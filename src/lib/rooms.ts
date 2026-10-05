@@ -47,25 +47,29 @@ export async function createChatRoomRecord(
   extra: { salt?: string; hostPeerId?: string } = {}
 ): Promise<{ roomId: string; expiresAt: number }> {
   const normId = roomId.trim().toUpperCase();
-  const roomRef = doc(db, "chat_rooms", normId);
   const expiresAt = ttlHours > 0 ? Date.now() + ttlHours * 60 * 60 * 1000 : 0;
 
-  await setDoc(
-    roomRef,
-    {
-      roomId: normId,
-      passHash, // Derived PBKDF2 hash or password verification
-      salt: extra.salt || '',
-      hostPeerId: extra.hostPeerId || '',
-      createdAt: Date.now(),
-      expiresAt,
-      ttlHours,
-      hostEmail: hostEmail || "anonymous",
-      status: "ACTIVE",
-      updatedAt: Date.now(),
-    },
-    { merge: true }
-  );
+  try {
+    const roomRef = doc(db, "chat_rooms", normId);
+    await setDoc(
+      roomRef,
+      {
+        roomId: normId,
+        passHash, // Derived PBKDF2 hash or password verification
+        salt: extra.salt || '',
+        hostPeerId: extra.hostPeerId || '',
+        createdAt: Date.now(),
+        expiresAt,
+        ttlHours,
+        hostEmail: hostEmail || "anonymous",
+        status: "ACTIVE",
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('[rooms.ts] createChatRoomRecord error:', err);
+  }
 
   return { roomId: normId, expiresAt };
 }
@@ -81,26 +85,30 @@ export async function saveLinktreeBundleRecord(
   extra: Record<string, any> = {}
 ): Promise<{ bundleId: string; expiresAt: number }> {
   const normId = bundleId.trim().toUpperCase();
-  const bundleRef = doc(db, "linktree_bundles", normId);
   const expiresAt = ttlHours > 0 ? Date.now() + ttlHours * 60 * 60 * 1000 : 0;
 
-  await setDoc(
-    bundleRef,
-    {
-      bundleId: normId,
-      title: title || `${normId} Link Hub`,
-      links: links || [],
-      theme: theme || "indigo",
-      createdAt: Date.now(),
-      expiresAt,
-      ttlHours,
-      hostEmail: hostEmail || "anonymous",
-      status: "ACTIVE",
-      updatedAt: Date.now(),
-      ...extra,
-    },
-    { merge: true }
-  );
+  try {
+    const bundleRef = doc(db, "linktree_bundles", normId);
+    await setDoc(
+      bundleRef,
+      {
+        bundleId: normId,
+        title: title || `${normId} Link Hub`,
+        links: links || [],
+        theme: theme || "indigo",
+        createdAt: Date.now(),
+        expiresAt,
+        ttlHours,
+        hostEmail: hostEmail || "anonymous",
+        status: "ACTIVE",
+        updatedAt: Date.now(),
+        ...extra,
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('[rooms.ts] saveLinktreeBundleRecord error:', err);
+  }
 
   return { bundleId: normId, expiresAt };
 }

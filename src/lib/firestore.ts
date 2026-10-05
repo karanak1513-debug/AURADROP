@@ -4,9 +4,6 @@ import app from "./firebase";
 let _db: Firestore | null = null;
 
 export function getFirestoreDb(): Firestore {
-  if (typeof window === 'undefined') {
-    return {} as Firestore;
-  }
   if (!_db) {
     try {
       _db = getFirestore(app);
