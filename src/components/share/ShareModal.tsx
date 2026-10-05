@@ -47,8 +47,8 @@ export function ShareModal({
   // Chat Magic Link (encodes passkey in hash fragment)
   const chatMagicLink = `${origin}/chat/${encodeURIComponent(id)}#key=${encodeURIComponent(passphrase)}`;
 
-  // Linktree Public Link
-  const linktreePublicLink = `${origin}/linktree/${encodeURIComponent(id)}`;
+  // Linktree Public Recipient Dashboard Link
+  const linktreePublicLink = `${origin}/l/${encodeURIComponent(id)}`;
 
   const activeShareLink = type === 'chat' ? chatMagicLink : linktreePublicLink;
 

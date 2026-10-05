@@ -246,10 +246,10 @@ export function SmartLinktreeVault({
     }
   }, [initialBundle]);
 
-  // Construct target link with password hash or query
+  // Construct target link pointing strictly to the public recipient view (/l/[podId])
   const getBundleUrl = (format: 'hash' | 'query' = qrFormat) => {
     if (typeof window === 'undefined') return '';
-    const base = `${window.location.origin}/links/${podId}`;
+    const base = `${window.location.origin}/l/${podId}`;
     if (!passphrase) return base;
     return format === 'hash'
       ? `${base}#key=${encodeURIComponent(passphrase)}`
@@ -648,6 +648,15 @@ export function SmartLinktreeVault({
                 >
                   {copiedLink ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3 text-slate-400" />}
                   <span>{copiedLink ? 'Copied' : 'Copy Link'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => window.open(getBundleUrl(qrFormat), '_blank', 'noopener,noreferrer')}
+                  className="text-xs font-semibold text-cyan-400 hover:text-cyan-300 flex items-center gap-1 px-2.5 py-1.5 rounded-xl hover:bg-cyan-500/10 border border-cyan-500/20 cursor-pointer"
+                  title="Open Public Recipient Page in New Tab"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span className="hidden sm:inline">Public View</span>
                 </button>
                 <button
                   type="button"
@@ -1472,9 +1481,13 @@ export function SmartLinktreeVault({
             <h3 className="font-heading font-black text-base text-white mb-1">
               {bundle.title || `${podId} Link Hub`}
             </h3>
-            <p className="text-xs text-slate-400 mb-4 font-normal">
+            <p className="text-xs text-slate-400 mb-2 font-normal">
               Scan with any mobile camera to open all links directly.
             </p>
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-500/15 border border-indigo-500/30 text-[10px] font-mono text-indigo-300 mb-3">
+              <Sparkles className="w-3 h-3 text-indigo-400" />
+              <span>Target: /l/{podId} (Public View)</span>
+            </div>
 
             <div className="bg-white p-3 rounded-2xl shadow-inner mx-auto mb-4 inline-block">
               {qrDataUrl ? (

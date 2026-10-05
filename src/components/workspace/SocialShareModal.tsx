@@ -83,7 +83,7 @@ export function SocialShareModal({
     if (typeof window === 'undefined') return '';
     let routePrefix = 'chat';
     if (window.location.pathname.startsWith('/drop/')) routePrefix = 'drop';
-    else if (window.location.pathname.startsWith('/links/')) routePrefix = 'links';
+    else if (window.location.pathname.startsWith('/links/') || window.location.pathname.startsWith('/linktree/') || window.location.pathname.startsWith('/l/')) routePrefix = 'l';
     else if (window.location.pathname.startsWith('/room/')) routePrefix = 'room';
     else if (window.location.pathname.startsWith('/pod/')) routePrefix = 'pod';
 
@@ -129,7 +129,11 @@ export function SocialShareModal({
   const timeStr = formatTime(secondsRemaining);
   const isLinktreeRoute =
     typeof window !== 'undefined' &&
-    (window.location.pathname.startsWith('/links') || autoJoinUrl.includes('/links/'));
+    (window.location.pathname.startsWith('/links') ||
+      window.location.pathname.startsWith('/linktree') ||
+      window.location.pathname.startsWith('/l') ||
+      autoJoinUrl.includes('/l/') ||
+      autoJoinUrl.includes('/links/'));
 
   const shareMessage = isNoTimeLimit
     ? `✨ ${isLinktreeRoute ? 'Smart Linktree & Dynamic QR Hub' : 'Aura Secret Hub'}:\n\n• Code: ${metadata.id}\n• Password: ${passphrase || 'None'}\n• 1-Tap Link: ${autoJoinUrl}\n\n♾️ Permanent Access (No Time Limit).\n🔒 Verified identity & end-to-end encrypted.`

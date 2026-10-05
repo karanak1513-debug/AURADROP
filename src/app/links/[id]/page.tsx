@@ -597,10 +597,10 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
 
               <button
                 type="button"
-                onClick={() => setPhase('inside')}
+                onClick={() => router.push(`/l/${linkId}`)}
                 className="w-full mt-2 py-2 text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors flex items-center justify-center gap-1 cursor-pointer"
               >
-                View Public Hub as Guest →
+                View Public Recipient Hub (/l/{linkId}) →
               </button>
             </form>
           </div>
