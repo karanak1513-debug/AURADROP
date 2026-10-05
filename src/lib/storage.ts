@@ -10,6 +10,7 @@ import {
   LinkBundleProfile,
 } from '@/types/vault';
 import { Redis } from '@upstash/redis';
+import { getStore } from '@netlify/blobs';
 
 // Ephemeral file storage in memory (buffer mapped by fileId)
 interface StoredFile {
@@ -33,6 +34,23 @@ const memoryStore = globalThis.__vaultMemoryStore ?? (globalThis.__vaultMemorySt
 const fileStore = globalThis.__vaultFileStore ?? (globalThis.__vaultFileStore = new Map());
 const subscribers = globalThis.__vaultSubscribers ?? (globalThis.__vaultSubscribers = new Map());
 
+// Netlify Blobs integration (auto-detected in Netlify Functions)
+function getBlobsPodStore() {
+  try {
+    return getStore({ name: 'auradrop-pods', consistency: 'strong' });
+  } catch {
+    return null;
+  }
+}
+
+function getBlobsFileStore() {
+  try {
+    return getStore({ name: 'auradrop-files', consistency: 'strong' });
+  } catch {
+    return null;
+  }
+}
+
 // Redis client initialization (optional; auto-detected)
 let redisClient: Redis | null = null;
 if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
@@ -46,7 +64,7 @@ if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) 
     console.warn('[CYPHREDROP] Failed to initialize Upstash Redis, falling back to ephemeral memory store:', err);
   }
 } else {
-  console.log('[CYPHREDROP] Running with High-Performance In-Memory Ephemeral Engine (Zero external dependencies).');
+  console.log('[CYPHREDROP] Running with Netlify Blobs & High-Performance Ephemeral Engine.');
 }
 
 /**
@@ -125,6 +143,16 @@ export async function createPod(config: PodConfig): Promise<PodMetadata> {
   // Save to Memory
   memoryStore.set(config.id, fullState);
 
+  // Save to Netlify Blobs if available
+  const podBlobStore = getBlobsPodStore();
+  if (podBlobStore) {
+    try {
+      await podBlobStore.setJSON(config.id, fullState);
+    } catch (err) {
+      console.warn('[CYPHREDROP] Netlify Blobs error on createPod:', err);
+    }
+  }
+
   // Save to Redis if configured
   if (redisClient) {
     try {
@@ -141,6 +169,22 @@ export async function createPod(config: PodConfig): Promise<PodMetadata> {
 export async function getPodState(podId: string): Promise<PodFullState | null> {
   // Check memory store
   let state = memoryStore.get(podId) || null;
+
+  // Check Netlify Blobs
+  if (!state) {
+    const podBlobStore = getBlobsPodStore();
+    if (podBlobStore) {
+      try {
+        const data = await podBlobStore.get(podId, { type: 'json' });
+        if (data && typeof data === 'object') {
+          state = data as PodFullState;
+          memoryStore.set(podId, state);
+        }
+      } catch (err) {
+        console.warn('[CYPHREDROP] Blobs getPodState error:', err);
+      }
+    }
+  }
 
   // Fallback to Redis
   if (!state && redisClient) {
@@ -177,6 +221,15 @@ export async function updateScratchpad(
 
   state.scratchpad = scratchpad;
   memoryStore.set(podId, state);
+
+  const podBlobStore = getBlobsPodStore();
+  if (podBlobStore) {
+    try {
+      await podBlobStore.setJSON(podId, state);
+    } catch (err) {
+      console.warn('[CYPHREDROP] Blobs setJSON error:', err);
+    }
+  }
 
   if (redisClient) {
     try {
@@ -216,6 +269,15 @@ export async function updateLinkBundle(
   if (state.auditLog.length > 50) state.auditLog.pop();
 
   memoryStore.set(podId, state);
+
+  const podBlobStore = getBlobsPodStore();
+  if (podBlobStore) {
+    try {
+      await podBlobStore.setJSON(podId, state);
+    } catch (err) {
+      console.warn('[CYPHREDROP] Blobs setJSON error:', err);
+    }
+  }
 
   if (redisClient) {
     try {
@@ -260,11 +322,49 @@ export async function addFile(
   metadata: VaultFileMetadata,
   buffer: Buffer
 ): Promise<boolean> {
-  const state = await getPodState(podId);
-  if (!state || state.metadata.isZeroized) return false;
+  let state = await getPodState(podId);
+  if (!state || state.metadata.isZeroized) {
+    if (!state) {
+      await createPod({
+        id: podId,
+        salt: '00000000000000000000000000000000',
+        ttl: '1h',
+        ttlSeconds: 3600,
+        burnOnDownload: metadata.burnOnDownload,
+        burnOnEmpty: false,
+        readOnlyGuests: false,
+        creatorPeerId: metadata.uploadedBy,
+      });
+      state = await getPodState(podId);
+    }
+    if (!state || state.metadata.isZeroized) return false;
+  }
 
-  // Store buffer
+  // Store buffer in memory
   fileStore.set(metadata.id, { metadata, buffer });
+
+  // Store buffer in Netlify Blobs
+  const fileBlobStore = getBlobsFileStore();
+  if (fileBlobStore) {
+    try {
+      const arrayBuf = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer;
+      await fileBlobStore.set(metadata.id, arrayBuf, {
+        metadata: {
+          id: metadata.id,
+          name: metadata.name,
+          size: metadata.size,
+          mimeType: metadata.mimeType,
+          sha256: metadata.sha256,
+          uploadedAt: metadata.uploadedAt,
+          uploadedBy: metadata.uploadedBy,
+          burnOnDownload: metadata.burnOnDownload,
+          downloadCount: metadata.downloadCount,
+        },
+      });
+    } catch (err) {
+      console.warn('[CYPHREDROP] Netlify Blobs error on addFile:', err);
+    }
+  }
 
   // Update file list
   state.files.push(metadata);
@@ -281,6 +381,16 @@ export async function addFile(
   if (state.auditLog.length > 50) state.auditLog.pop();
 
   memoryStore.set(podId, state);
+
+  // Persist updated pod state to Blobs
+  const podBlobStore = getBlobsPodStore();
+  if (podBlobStore) {
+    try {
+      await podBlobStore.setJSON(podId, state);
+    } catch (err) {
+      console.warn('[CYPHREDROP] Blobs setJSON error:', err);
+    }
+  }
 
   if (redisClient) {
     try {
@@ -300,7 +410,38 @@ export async function addFile(
 }
 
 export async function getFileData(fileId: string): Promise<StoredFile | null> {
-  return fileStore.get(fileId) || null;
+  const local = fileStore.get(fileId);
+  if (local) return local;
+
+  const fileBlobStore = getBlobsFileStore();
+  if (fileBlobStore) {
+    try {
+      const res = await fileBlobStore.getWithMetadata(fileId, { type: 'arrayBuffer' });
+      if (res && res.data) {
+        const meta = (res.metadata || {}) as unknown as VaultFileMetadata;
+        const stored: StoredFile = {
+          metadata: {
+            id: meta.id || fileId,
+            name: meta.name || 'encrypted.bin',
+            size: meta.size || res.data.byteLength,
+            mimeType: meta.mimeType || 'application/octet-stream',
+            sha256: meta.sha256 || '',
+            uploadedAt: meta.uploadedAt || Date.now(),
+            uploadedBy: meta.uploadedBy || 'ANONYMOUS',
+            downloadCount: meta.downloadCount || 0,
+            burnOnDownload: meta.burnOnDownload || false,
+          },
+          buffer: Buffer.from(res.data),
+        };
+        fileStore.set(fileId, stored);
+        return stored;
+      }
+    } catch (err) {
+      console.warn('[CYPHREDROP] Blobs getFileData error:', err);
+    }
+  }
+
+  return null;
 }
 
 export async function shredFile(podId: string, fileId: string, reason = 'SHRED_MANUAL'): Promise<boolean> {
@@ -310,6 +451,15 @@ export async function shredFile(podId: string, fileId: string, reason = 'SHRED_M
   if (stored) {
     zeroizeBuffer(stored.buffer);
     fileStore.delete(fileId);
+  }
+
+  const fileBlobStore = getBlobsFileStore();
+  if (fileBlobStore) {
+    try {
+      await fileBlobStore.delete(fileId);
+    } catch (err) {
+      console.warn('[CYPHREDROP] Blobs delete error:', err);
+    }
   }
 
   if (state) {
@@ -325,6 +475,15 @@ export async function shredFile(podId: string, fileId: string, reason = 'SHRED_M
     if (state.auditLog.length > 50) state.auditLog.pop();
 
     memoryStore.set(podId, state);
+
+    const podBlobStore = getBlobsPodStore();
+    if (podBlobStore) {
+      try {
+        await podBlobStore.setJSON(podId, state);
+      } catch (err) {
+        console.warn('[CYPHREDROP] Blobs setJSON error:', err);
+      }
+    }
 
     if (redisClient) {
       try {
@@ -462,15 +621,21 @@ export async function removePeer(podId: string, peerId: string): Promise<void> {
  * Purges memory, shreds all file buffers, deletes from Redis, and broadcasts zeroize to all peers
  */
 export async function purgePod(podId: string, reason: string): Promise<boolean> {
-  const state = memoryStore.get(podId);
+  const state = await getPodState(podId);
 
-  // Shred all associated files with DoD zero-fill
+  // Shred all associated files with DoD zero-fill and delete from Blobs
   if (state && state.files) {
+    const fileBlobStore = getBlobsFileStore();
     for (const f of state.files) {
       const stored = fileStore.get(f.id);
       if (stored) {
         zeroizeBuffer(stored.buffer);
         fileStore.delete(f.id);
+      }
+      if (fileBlobStore) {
+        try {
+          await fileBlobStore.delete(f.id);
+        } catch {}
       }
     }
   }
@@ -479,6 +644,14 @@ export async function purgePod(podId: string, reason: string): Promise<boolean> 
   if (state) {
     state.metadata.isZeroized = true;
     memoryStore.delete(podId);
+  }
+
+  // Delete from Netlify Blobs
+  const podBlobStore = getBlobsPodStore();
+  if (podBlobStore) {
+    try {
+      await podBlobStore.delete(podId);
+    } catch {}
   }
 
   // Remove from Redis

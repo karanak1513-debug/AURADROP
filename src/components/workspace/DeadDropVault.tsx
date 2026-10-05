@@ -166,7 +166,9 @@ export function DeadDropVault({
       });
 
       if (!res.ok) {
-        throw new Error('Upload failed');
+        const errJson = await res.json().catch(() => null);
+        const detail = errJson?.error || errJson?.message || `Server returned status ${res.status}`;
+        throw new Error(detail);
       }
 
       setProgressPercent(100);
@@ -179,11 +181,12 @@ export function DeadDropVault({
         setProgressPercent(0);
         setTelemetryStatus('');
       }, 700);
-    } catch (err) {
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : 'Could not upload file. Please try again.';
       console.error('File encryption & dispatch error:', err);
       sound.playAlert?.();
       setIsProcessing(false);
-      alert('Could not upload file. Please try again.');
+      alert(errorMsg);
     }
   };
 

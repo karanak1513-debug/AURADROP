@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { addFile, getPodState } from '@/lib/storage';
+import { addFile, getPodState, createPod } from '@/lib/storage';
 import { VaultFileMetadata } from '@/types/vault';
 
 export const dynamic = 'force-dynamic';
@@ -34,10 +34,25 @@ export async function POST(
   try {
     const { id } = await context.params;
     const podId = id.toUpperCase();
-    const state = await getPodState(podId);
+    let state = await getPodState(podId);
 
     if (!state || state.metadata.isZeroized) {
-      return NextResponse.json({ error: 'POD_NOT_ACTIVE' }, { status: 404 });
+      if (!state) {
+        // Auto-provision pod in current serverless container if cold-started
+        await createPod({
+          id: podId,
+          salt: '00000000000000000000000000000000',
+          ttl: '1h',
+          ttlSeconds: 3600,
+          burnOnDownload: false,
+          burnOnEmpty: false,
+          readOnlyGuests: false,
+          creatorPeerId: 'OPERATOR',
+        });
+        state = await getPodState(podId);
+      } else {
+        return NextResponse.json({ error: 'This drop pod has been shredded or expired.' }, { status: 410 });
+      }
     }
 
     const formData = await req.formData();
