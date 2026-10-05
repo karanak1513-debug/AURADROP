@@ -19,6 +19,15 @@ interface StoredFile {
 }
 
 // Global in-memory state fallback & SSE subscribers
+interface ChunkSession {
+  fileId: string;
+  podId: string;
+  metadata: VaultFileMetadata;
+  totalChunks: number;
+  chunks: Map<number, Buffer>;
+  updatedAt: number;
+}
+
 declare global {
   // eslint-disable-next-line no-var
   var __vaultMemoryStore: Map<string, PodFullState> | undefined;
@@ -27,12 +36,15 @@ declare global {
   // eslint-disable-next-line no-var
   var __vaultSubscribers: Map<string, Set<(event: { type: string; payload: unknown }) => void>> | undefined;
   // eslint-disable-next-line no-var
+  var __vaultChunkStore: Map<string, ChunkSession> | undefined;
+  // eslint-disable-next-line no-var
   var __vaultJanitorStarted: boolean | undefined;
 }
 
 const memoryStore = globalThis.__vaultMemoryStore ?? (globalThis.__vaultMemoryStore = new Map());
 const fileStore = globalThis.__vaultFileStore ?? (globalThis.__vaultFileStore = new Map());
 const subscribers = globalThis.__vaultSubscribers ?? (globalThis.__vaultSubscribers = new Map());
+const chunkStore = globalThis.__vaultChunkStore ?? (globalThis.__vaultChunkStore = new Map());
 
 // Netlify Blobs integration (auto-detected in Netlify Functions)
 function getBlobsPodStore() {
@@ -88,6 +100,12 @@ if (!globalThis.__vaultJanitorStarted) {
       if ((pod.metadata.expiresAt > 0 && pod.metadata.expiresAt <= now) || pod.metadata.isZeroized) {
         console.log(`[CYPHREDROP JANITOR] TTL expired or zeroized for pod: ${podId}. Executing wipe sequence.`);
         await purgePod(podId, 'LIFECYCLE_TTL_EXPIRED');
+      }
+    }
+    // Purge stale incomplete chunk upload sessions older than 10 mins
+    for (const [key, sess] of chunkStore.entries()) {
+      if (now - sess.updatedAt > 10 * 60 * 1000) {
+        chunkStore.delete(key);
       }
     }
   }, 10_000); // Check every 10 seconds
@@ -407,6 +425,51 @@ export async function addFile(
   });
 
   return true;
+}
+
+export async function addFileChunk(
+  podId: string,
+  metadata: VaultFileMetadata,
+  chunkIndex: number,
+  totalChunks: number,
+  chunkBuffer: Buffer
+): Promise<{ complete: boolean; file?: VaultFileMetadata }> {
+  let session = chunkStore.get(metadata.id);
+  if (!session) {
+    session = {
+      fileId: metadata.id,
+      podId,
+      metadata,
+      totalChunks,
+      chunks: new Map(),
+      updatedAt: Date.now(),
+    };
+    chunkStore.set(metadata.id, session);
+  }
+
+  session.chunks.set(chunkIndex, chunkBuffer);
+  session.updatedAt = Date.now();
+
+  if (session.chunks.size === totalChunks) {
+    const orderedBuffers: Buffer[] = [];
+    for (let i = 0; i < totalChunks; i++) {
+      const b = session.chunks.get(i);
+      if (!b) {
+        throw new Error(`Missing chunk index ${i} for file ${metadata.id}`);
+      }
+      orderedBuffers.push(b);
+    }
+    const fullBuffer = Buffer.concat(orderedBuffers);
+    chunkStore.delete(metadata.id);
+
+    const added = await addFile(podId, metadata, fullBuffer);
+    if (!added) {
+      throw new Error('Failed to save reassembled file into pod');
+    }
+    return { complete: true, file: metadata };
+  }
+
+  return { complete: false };
 }
 
 export async function getFileData(fileId: string): Promise<StoredFile | null> {

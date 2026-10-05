@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Upload,
   Download,
@@ -22,6 +22,9 @@ import {
   Video,
   CheckCircle2,
   AlertTriangle,
+  Clipboard,
+  Layers,
+  FileUp,
 } from 'lucide-react';
 import { VaultFileMetadata, Peer } from '@/types/vault';
 import { encryptFileBuffer, decryptFileBuffer } from '@/lib/crypto';
@@ -29,7 +32,7 @@ import { sound } from '@/lib/sound';
 
 interface DeadDropVaultProps {
   podId: string;
-  cryptoKey: CryptoKey;
+  cryptoKey: CryptoKey | null;
   files: VaultFileMetadata[];
   currentPeer: Peer;
   isReadOnly: boolean;
@@ -46,10 +49,20 @@ export function DeadDropVault({
   onFileUploaded,
   onFileShredded,
 }: DeadDropVaultProps) {
-  const [isDragging, setIsDragging] = useState(false);
+  // Drag states
+  const [isWindowDragging, setIsWindowDragging] = useState(false);
+  const [isZoneDragging, setIsZoneDragging] = useState(false);
+  const windowDragCounter = useRef(0);
+  const zoneDragCounter = useRef(0);
+
+  // Upload processing & queue
   const [isProcessing, setIsProcessing] = useState(false);
   const [telemetryStatus, setTelemetryStatus] = useState<string>('');
   const [progressPercent, setProgressPercent] = useState<number>(0);
+  const [currentQueue, setCurrentQueue] = useState<{ name: string; size: number }[]>([]);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  // Action states
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [shreddingId, setShreddingId] = useState<string | null>(null);
   const [burnOnDownload, setBurnOnDownload] = useState<boolean>(true);
@@ -123,34 +136,46 @@ export function DeadDropVault({
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
   };
 
-  // Process File: Client-Side SHA256 -> AES-256-GCM Encryption -> Upload
-  const handleProcessFile = async (rawFile: globalThis.File) => {
-    if (isReadOnly) return;
-
+  // Upload single file with client encryption & chunking resilience
+  const uploadSingleFile = async (
+    rawFile: globalThis.File,
+    fileIndex: number,
+    totalFiles: number
+  ) => {
     if (rawFile.size > 25 * 1024 * 1024) {
-      alert('File too large. Maximum file size is 25 MB.');
-      return;
+      throw new Error(`"${rawFile.name}" exceeds the 25 MB limit.`);
     }
 
-    try {
-      setIsProcessing(true);
-      setProgressPercent(15);
-      setTelemetryStatus('Reading file bytes…');
+    if (!cryptoKey) {
+      throw new Error('Encryption key not initialized. Please verify your passphrase.');
+    }
 
-      const arrayBuffer = await rawFile.arrayBuffer();
-      setProgressPercent(45);
-      setTelemetryStatus('Encrypting on your device (AES-256-GCM)…');
+    const prefix = totalFiles > 1 ? `[${fileIndex}/${totalFiles}] ` : '';
 
-      const { encryptedBlob, sha256 } = await encryptFileBuffer(
-        arrayBuffer,
-        rawFile.name,
-        rawFile.type || 'application/octet-stream',
-        cryptoKey
-      );
+    // Step 1: Read raw bytes
+    setProgressPercent(15);
+    setTelemetryStatus(`${prefix}Reading file bytes…`);
+    const arrayBuffer = await rawFile.arrayBuffer();
 
-      setProgressPercent(80);
-      setTelemetryStatus('Uploading encrypted envelope…');
+    // Step 2: Encrypt client-side using AES-256-GCM
+    setProgressPercent(40);
+    setTelemetryStatus(`${prefix}Encrypting with AES-256-GCM on your device…`);
+    const { encryptedBlob, sha256 } = await encryptFileBuffer(
+      arrayBuffer,
+      rawFile.name,
+      rawFile.type || 'application/octet-stream',
+      cryptoKey
+    );
 
+    // Step 3: Upload envelope (single or chunked for serverless payload safety)
+    setProgressPercent(60);
+    setTelemetryStatus(`${prefix}Uploading encrypted envelope…`);
+
+    const CHUNK_SIZE = 3.5 * 1024 * 1024; // 3.5 MB chunks (well below 6 MB AWS Lambda / Netlify limit)
+    const fileId = `file-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 7)}`;
+
+    if (encryptedBlob.size <= CHUNK_SIZE) {
+      // Direct single-request upload
       const formData = new FormData();
       formData.append('file', encryptedBlob, rawFile.name);
       formData.append('name', rawFile.name);
@@ -167,44 +192,208 @@ export function DeadDropVault({
 
       if (!res.ok) {
         const errJson = await res.json().catch(() => null);
-        const detail = errJson?.error || errJson?.message || `Server returned status ${res.status}`;
+        const detail = errJson?.details || errJson?.error || errJson?.message || `Server returned status ${res.status}`;
         throw new Error(detail);
       }
+    } else {
+      // Chunked upload for files exceeding single serverless request envelope
+      const totalChunks = Math.ceil(encryptedBlob.size / CHUNK_SIZE);
+      for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+        const start = chunkIdx * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, encryptedBlob.size);
+        const chunkBlob = encryptedBlob.slice(start, end);
 
-      setProgressPercent(100);
-      setTelemetryStatus('File encrypted & stored in memory!');
-      sound.playSuccess?.();
-      onFileUploaded();
+        const chunkFormData = new FormData();
+        chunkFormData.append('chunk', chunkBlob);
+        chunkFormData.append('fileId', fileId);
+        chunkFormData.append('chunkIndex', String(chunkIdx));
+        chunkFormData.append('totalChunks', String(totalChunks));
+        chunkFormData.append('name', rawFile.name);
+        chunkFormData.append('size', String(rawFile.size));
+        chunkFormData.append('mimeType', rawFile.type || 'application/octet-stream');
+        chunkFormData.append('sha256', sha256);
+        chunkFormData.append('uploadedBy', currentPeer.codename);
+        chunkFormData.append('burnOnDownload', String(burnOnDownload));
+
+        const chunkPercent = Math.round(60 + ((chunkIdx + 1) / totalChunks) * 35);
+        setProgressPercent(chunkPercent);
+        setTelemetryStatus(`${prefix}Uploading chunk ${chunkIdx + 1} of ${totalChunks} (${Math.round((end / encryptedBlob.size) * 100)}%)…`);
+
+        const res = await fetch(`/api/pods/${encodeURIComponent(podId)}/files/chunk`, {
+          method: 'POST',
+          body: chunkFormData,
+        });
+
+        if (!res.ok) {
+          const errJson = await res.json().catch(() => null);
+          const detail = errJson?.details || errJson?.error || errJson?.message || `Chunk ${chunkIdx + 1} upload failed (${res.status})`;
+          throw new Error(detail);
+        }
+      }
+    }
+
+    setProgressPercent(100);
+    setTelemetryStatus(`${prefix}Encrypted & sealed in memory!`);
+    sound.playSuccess?.();
+    onFileUploaded();
+  };
+
+  // Process batch of files (from drag-drop, file picker, or clipboard)
+  const handleProcessFiles = useCallback(
+    async (filesList: globalThis.File[]) => {
+      if (isReadOnly || filesList.length === 0) return;
+
+      if (!cryptoKey) {
+        setErrorMessage('Encryption key not loaded. Please enter vault passphrase first.');
+        sound.playAlert?.();
+        return;
+      }
+
+      setIsProcessing(true);
+      setErrorMessage(null);
+      setCurrentQueue(filesList.map((f) => ({ name: f.name, size: f.size })));
+
+      const errors: string[] = [];
+
+      for (let i = 0; i < filesList.length; i++) {
+        const file = filesList[i];
+        try {
+          await uploadSingleFile(file, i + 1, filesList.length);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`Failed to upload ${file.name}:`, err);
+          errors.push(`${file.name}: ${msg}`);
+        }
+      }
 
       setTimeout(() => {
         setIsProcessing(false);
         setProgressPercent(0);
         setTelemetryStatus('');
+        setCurrentQueue([]);
       }, 700);
-    } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : 'Could not upload file. Please try again.';
-      console.error('File encryption & dispatch error:', err);
-      sound.playAlert?.();
-      setIsProcessing(false);
-      alert(errorMsg);
+
+      if (errors.length > 0) {
+        sound.playAlert?.();
+        setErrorMessage(errors.join(' | '));
+      }
+    },
+    [cryptoKey, isReadOnly, podId, currentPeer.codename, burnOnDownload, onFileUploaded]
+  );
+
+  // ── 1. Window-Wide Drag & Drop Listeners ─────────────────────────────────
+  useEffect(() => {
+    const handleWindowDragEnter = (e: DragEvent) => {
+      e.preventDefault();
+      windowDragCounter.current++;
+      if (e.dataTransfer?.types?.includes('Files')) {
+        setIsWindowDragging(true);
+      }
+    };
+
+    const handleWindowDragOver = (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'copy';
+      }
+    };
+
+    const handleWindowDragLeave = (e: DragEvent) => {
+      e.preventDefault();
+      windowDragCounter.current--;
+      if (windowDragCounter.current <= 0) {
+        windowDragCounter.current = 0;
+        setIsWindowDragging(false);
+      }
+    };
+
+    const handleWindowDrop = (e: DragEvent) => {
+      e.preventDefault();
+      windowDragCounter.current = 0;
+      setIsWindowDragging(false);
+      setIsZoneDragging(false);
+
+      if (e.dataTransfer?.files && e.dataTransfer.files.length > 0) {
+        handleProcessFiles(Array.from(e.dataTransfer.files));
+      }
+    };
+
+    window.addEventListener('dragenter', handleWindowDragEnter);
+    window.addEventListener('dragover', handleWindowDragOver);
+    window.addEventListener('dragleave', handleWindowDragLeave);
+    window.addEventListener('drop', handleWindowDrop);
+
+    return () => {
+      window.removeEventListener('dragenter', handleWindowDragEnter);
+      window.removeEventListener('dragover', handleWindowDragOver);
+      window.removeEventListener('dragleave', handleWindowDragLeave);
+      window.removeEventListener('drop', handleWindowDrop);
+    };
+  }, [handleProcessFiles]);
+
+  // ── 2. Clipboard Paste Listener (Ctrl+V / Cmd+V) ──────────────────────────
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      if (isReadOnly || isProcessing) return;
+
+      const activeEl = document.activeElement;
+      if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+        return;
+      }
+
+      if (e.clipboardData && e.clipboardData.files && e.clipboardData.files.length > 0) {
+        e.preventDefault();
+        const filesArray = Array.from(e.clipboardData.files).map((f) => {
+          // If screenshot or unnamed clipboard blob, assign clean timestamped name
+          if (f.name === 'image.png' || !f.name) {
+            return new File([f], `clipboard-${new Date().toISOString().replace(/[:.]/g, '-')}.png`, {
+              type: f.type || 'image/png',
+            });
+          }
+          return f;
+        });
+
+        sound.playClick?.();
+        handleProcessFiles(filesArray);
+      }
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => window.removeEventListener('paste', handlePaste);
+  }, [isReadOnly, isProcessing, handleProcessFiles]);
+
+  // ── 3. Dedicated Drop Zone Drag Handlers ──────────────────────────────────
+  const handleZoneDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    zoneDragCounter.current++;
+    setIsZoneDragging(true);
+  };
+
+  const handleZoneDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'copy';
+    }
+    if (!isZoneDragging) setIsZoneDragging(true);
+  };
+
+  const handleZoneDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    zoneDragCounter.current--;
+    if (zoneDragCounter.current <= 0) {
+      zoneDragCounter.current = 0;
+      setIsZoneDragging(false);
     }
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
+  const handleZoneDrop = (e: React.DragEvent) => {
     e.preventDefault();
-    if (!isDragging) setIsDragging(true);
-  };
+    zoneDragCounter.current = 0;
+    setIsZoneDragging(false);
+    setIsWindowDragging(false);
 
-  const handleDragLeave = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleProcessFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleProcessFiles(Array.from(e.dataTransfer.files));
     }
   };
 
@@ -213,6 +402,12 @@ export function DeadDropVault({
     fileMeta: VaultFileMetadata,
     triggerDownload: boolean = true
   ) => {
+    if (!cryptoKey) {
+      setErrorMessage('Cannot decrypt file: Encryption key not unlocked.');
+      sound.playAlert?.();
+      return;
+    }
+
     try {
       setDownloadingId(fileMeta.id);
       sound.playClick?.();
@@ -259,7 +454,7 @@ export function DeadDropVault({
     } catch (err) {
       console.error('Download & decryption error:', err);
       sound.playAlert?.();
-      alert('Could not open file: File was burned or password is incorrect.');
+      setErrorMessage('Could not decrypt file: File was burned or password is incorrect.');
     } finally {
       setDownloadingId(null);
     }
@@ -267,7 +462,7 @@ export function DeadDropVault({
 
   // Shred / Vaporize File Instantly
   const handleShredFile = async (fileId: string) => {
-    if (!confirm('Permanently destroy this file now? All encrypted buffers will be overwritten with zeros.')) {
+    if (!confirm('Permanently destroy this file now? All encrypted buffers will be zeroized.')) {
       return;
     }
 
@@ -292,7 +487,47 @@ export function DeadDropVault({
   };
 
   return (
-    <div className="w-full flex flex-col gap-5 sm:gap-6 animate-in fade-in duration-200">
+    <div className="w-full flex flex-col gap-5 sm:gap-6 animate-in fade-in duration-200 relative">
+      {/* ── 0. Full-Window Holographic Drag Overlay ── */}
+      {isWindowDragging && !isReadOnly && (
+        <div className="fixed inset-0 z-50 bg-[#070B16]/85 backdrop-blur-xl flex flex-col items-center justify-center p-6 border-4 border-dashed border-cyan-400 pointer-events-none transition-all">
+          <div className="relative flex flex-col items-center max-w-md text-center">
+            <div className="w-24 h-24 rounded-3xl bg-gradient-to-tr from-indigo-500/30 to-cyan-500/30 border border-cyan-400/50 flex items-center justify-center mb-6 shadow-[0_0_60px_rgba(6,182,212,0.4)] animate-bounce">
+              <FileUp className="w-12 h-12 text-cyan-300" />
+            </div>
+            <h2 className="font-heading font-black text-2xl sm:text-3xl text-white mb-2 tracking-tight">
+              Drop Files to Encrypt & Store
+            </h2>
+            <p className="text-sm text-cyan-200/90 max-w-sm mb-5 leading-relaxed">
+              Drop anywhere in your browser window to seal client-side with AES-256-GCM.
+            </p>
+            <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white/10 border border-white/20 text-xs font-semibold text-white shadow-lg">
+              <Shield className="w-4 h-4 text-emerald-400" />
+              <span>Multi-File Drop · Auto-Chunking · Up to 25 MB</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Error Banner Toast ── */}
+      {errorMessage && (
+        <div className="rounded-2xl p-4 bg-rose-500/15 border border-rose-500/30 text-rose-200 flex items-center justify-between gap-3 shadow-xl animate-in fade-in">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />
+            <p className="text-xs sm:text-sm font-medium leading-snug truncate">
+              {errorMessage}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setErrorMessage(null)}
+            className="p-1 rounded-lg hover:bg-rose-500/20 text-rose-300 shrink-0 transition-colors cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* ── 1. Top Header Banner ── */}
       <div className="apple-frosted-glass rounded-3xl p-4 sm:p-6 shadow-2xl border border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="flex items-center gap-3 sm:gap-3.5">
@@ -311,7 +546,7 @@ export function DeadDropVault({
               </span>
             </div>
             <p className="text-xs text-slate-400 font-normal mt-0.5 leading-relaxed">
-              Client-side AES-256-GCM encryption · Burn-on-Download · In-Browser Decryption
+              Client-side AES-256-GCM encryption · Burn-on-Download · Multi-File Drag & Drop
             </p>
           </div>
         </div>
@@ -337,27 +572,29 @@ export function DeadDropVault({
         <input
           ref={fileInputRef}
           type="file"
+          multiple
           className="hidden"
           onChange={(e) => {
-            if (e.target.files && e.target.files[0]) {
-              handleProcessFile(e.target.files[0]);
+            if (e.target.files && e.target.files.length > 0) {
+              handleProcessFiles(Array.from(e.target.files));
             }
           }}
           disabled={isReadOnly || isProcessing}
         />
 
         <div
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
+          onDragEnter={handleZoneDragEnter}
+          onDragOver={handleZoneDragOver}
+          onDragLeave={handleZoneDragLeave}
+          onDrop={handleZoneDrop}
           onClick={() => {
             if (!isReadOnly && !isProcessing) {
               fileInputRef.current?.click();
             }
           }}
           className={`border-2 border-dashed rounded-3xl p-6 sm:p-12 text-center transition-all cursor-pointer relative overflow-hidden ${
-            isDragging
-              ? 'border-indigo-400 bg-indigo-500/15 scale-[1.01]'
+            isZoneDragging
+              ? 'border-cyan-400 bg-cyan-500/20 scale-[1.01] shadow-[0_0_40px_rgba(6,182,212,0.25)]'
               : 'border-white/15 hover:border-indigo-500/40 bg-black/30 hover:bg-black/50'
           } ${isProcessing ? 'pointer-events-none' : ''}`}
         >
@@ -370,24 +607,39 @@ export function DeadDropVault({
                 {telemetryStatus}
               </h3>
               <p className="text-xs text-indigo-400 font-mono font-bold">{progressPercent}%</p>
-              <div className="w-48 h-1.5 bg-slate-800 rounded-full overflow-hidden mt-3">
+              <div className="w-56 h-2 bg-slate-800 rounded-full overflow-hidden mt-3 shadow-inner">
                 <div
-                  className="h-full bg-gradient-to-r from-indigo-500 to-cyan-400 transition-all duration-300"
+                  className="h-full bg-gradient-to-r from-indigo-500 via-cyan-400 to-emerald-400 transition-all duration-300"
                   style={{ width: `${progressPercent}%` }}
                 />
               </div>
+
+              {currentQueue.length > 1 && (
+                <div className="mt-4 flex items-center gap-2 text-xs text-slate-400">
+                  <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>Processing batch of {currentQueue.length} files…</span>
+                </div>
+              )}
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center">
               <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-3xl bg-indigo-500/20 border border-indigo-500/30 text-indigo-400 flex items-center justify-center mb-4 shadow-lg shadow-indigo-500/20 group-hover:scale-105 transition-transform">
                 <Upload className="w-6 h-6 sm:w-7 sm:h-7" />
               </div>
+
               <h3 className="font-heading font-bold text-base sm:text-lg text-white mb-1.5">
                 Drag & Drop files here, or <span className="text-indigo-400 hover:text-indigo-300 underline">browse</span>
               </h3>
-              <p className="text-xs text-slate-400 max-w-sm leading-relaxed mb-4">
-                Up to 25 MB. Files are encrypted client-side in your browser before upload.
-              </p>
+
+              <div className="flex items-center gap-2 text-xs text-slate-400 mb-4 flex-wrap justify-center">
+                <span>Multi-file supported</span>
+                <span>•</span>
+                <span>Up to 25 MB</span>
+                <span>•</span>
+                <span className="text-indigo-300 font-semibold flex items-center gap-1">
+                  <Clipboard className="w-3 h-3" /> Paste with Ctrl+V
+                </span>
+              </div>
 
               {/* Upload Settings Toggle inside Dropzone */}
               <div
@@ -442,7 +694,7 @@ export function DeadDropVault({
               No files in the vault yet
             </p>
             <p className="text-xs text-slate-400 max-w-sm mx-auto">
-              Drop a file above to share with room peers. No login required.
+              Drop files above or press Ctrl+V to paste screenshots. No login required.
             </p>
           </div>
         ) : (

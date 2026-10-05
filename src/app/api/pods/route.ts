@@ -52,10 +52,11 @@ export async function POST(req: NextRequest) {
       success: true,
       metadata,
     });
-  } catch (err) {
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
     console.error('[API /api/pods POST] Error:', err);
     return NextResponse.json(
-      { error: 'Failed to provision ephemeral pod' },
+      { error: 'Failed to provision ephemeral pod', details: errorMsg },
       { status: 500 }
     );
   }

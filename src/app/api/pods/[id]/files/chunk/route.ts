@@ -1,31 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { addFile, getPodState, createPod } from '@/lib/storage';
+import { addFileChunk, getPodState, createPod } from '@/lib/storage';
 import { VaultFileMetadata } from '@/types/vault';
 
 export const dynamic = 'force-dynamic';
-
-export async function GET(
-  req: NextRequest,
-  context: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await context.params;
-    const podId = id.toUpperCase();
-    const state = await getPodState(podId);
-
-    if (!state) {
-      return NextResponse.json({ error: 'POD_NOT_FOUND' }, { status: 404 });
-    }
-
-    return NextResponse.json({
-      success: true,
-      files: state.files,
-    });
-  } catch (err) {
-    console.error('[API /api/pods/[id]/files GET] Error:', err);
-    return NextResponse.json({ error: 'Failed to list files' }, { status: 500 });
-  }
-}
 
 export async function POST(
   req: NextRequest,
@@ -51,12 +28,18 @@ export async function POST(
         });
         state = await getPodState(podId);
       } else {
-        return NextResponse.json({ error: 'This drop pod has been shredded or expired.' }, { status: 410 });
+        return NextResponse.json(
+          { error: 'This drop pod has been shredded or expired.' },
+          { status: 410 }
+        );
       }
     }
 
     const formData = await req.formData();
-    const file = formData.get('file') as File | null;
+    const chunk = formData.get('chunk') as File | null;
+    const fileId = formData.get('fileId') as string;
+    const chunkIndex = parseInt((formData.get('chunkIndex') as string) || '0', 10);
+    const totalChunks = parseInt((formData.get('totalChunks') as string) || '1', 10);
     const name = (formData.get('name') as string) || 'encrypted.bin';
     const size = parseInt((formData.get('size') as string) || '0', 10);
     const mimeType = (formData.get('mimeType') as string) || 'application/octet-stream';
@@ -64,18 +47,20 @@ export async function POST(
     const uploadedBy = (formData.get('uploadedBy') as string) || 'OPERATOR';
     const burnOnDownload = formData.get('burnOnDownload') === 'true';
 
-    if (!file) {
-      return NextResponse.json({ error: 'No file provided in request' }, { status: 400 });
+    if (!chunk || !fileId) {
+      return NextResponse.json(
+        { error: 'Missing chunk payload or fileId' },
+        { status: 400 }
+      );
     }
 
-    const arrayBuffer = await file.arrayBuffer();
+    const arrayBuffer = await chunk.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    const fileId = `file-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 7)}`;
     const metadata: VaultFileMetadata = {
       id: fileId,
       name,
-      size: size || buffer.byteLength,
+      size,
       mimeType,
       sha256,
       uploadedAt: Date.now(),
@@ -84,18 +69,27 @@ export async function POST(
       burnOnDownload,
     };
 
-    const added = await addFile(podId, metadata, buffer);
-    if (!added) {
-      return NextResponse.json({ error: 'Failed to store encrypted file' }, { status: 500 });
-    }
+    const result = await addFileChunk(
+      podId,
+      metadata,
+      chunkIndex,
+      totalChunks,
+      buffer
+    );
 
     return NextResponse.json({
       success: true,
-      file: metadata,
+      complete: result.complete,
+      file: result.file,
+      chunkIndex,
+      totalChunks,
     });
   } catch (err: unknown) {
     const errorMsg = err instanceof Error ? err.message : String(err);
-    console.error('[API /api/pods/[id]/files POST] Error:', err);
-    return NextResponse.json({ error: 'File upload processing failed', details: errorMsg }, { status: 500 });
+    console.error('[API /api/pods/[id]/files/chunk POST] Error:', err);
+    return NextResponse.json(
+      { error: 'Chunk upload failed', details: errorMsg },
+      { status: 500 }
+    );
   }
 }
