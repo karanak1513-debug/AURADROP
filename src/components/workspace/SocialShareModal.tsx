@@ -26,6 +26,7 @@ import {
 import QRCode from 'qrcode';
 import { PodMetadata } from '@/types/vault';
 import { sound } from '@/lib/sound';
+import { createChatRoomRecord, saveLinktreeBundleRecord } from '@/lib/rooms';
 
 interface SocialShareModalProps {
   isOpen: boolean;
@@ -52,6 +53,20 @@ export function SocialShareModal({
   const [copiedFullMessage, setCopiedFullMessage] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [includeTimerInMsg, setIncludeTimerInMsg] = useState(true);
+
+  // Authoritative handshake commit to Firestore BEFORE user shares link
+  useEffect(() => {
+    if (!isOpen || !metadata?.id) return;
+    const normId = metadata.id.trim().toUpperCase();
+    if (typeof window !== 'undefined') {
+      const p = window.location.pathname;
+      if (p.startsWith('/chat/') || p.startsWith('/room/')) {
+        createChatRoomRecord(normId, passphrase || '', 1, 'anonymous', { salt: metadata.salt, hostPeerId: metadata.creatorPeerId }).catch(() => {});
+      } else if (p.startsWith('/links/') || p.startsWith('/linktree/')) {
+        saveLinktreeBundleRecord(normId, `${normId} Link Hub`, [], 'indigo', 24, 'anonymous').catch(() => {});
+      }
+    }
+  }, [isOpen, metadata?.id, metadata?.salt, metadata?.creatorPeerId, passphrase]);
 
   // Format time remaining
   const formatTime = (totalSeconds: number) => {

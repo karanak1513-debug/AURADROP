@@ -26,6 +26,11 @@ import { generateKeyFromPassphrase, generateDeterministicSalt } from '@/lib/cryp
 import { ChatRoomMetadata } from '@/lib/chatStore';
 import { LinkBundleProfile, Peer, PodMetadata } from '@/types/vault';
 import { sound } from '@/lib/sound';
+import {
+  getLinktreeBundleRecord,
+  saveLinktreeBundleRecord,
+  subscribeToLinktreeBundle,
+} from '@/lib/rooms';
 
 function formatCountdown(s: number): string {
   if (s <= 0) return '00:00';
@@ -122,6 +127,20 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
         let meta: PodMetadata | null = null;
         let bundle: LinkBundleProfile | undefined = undefined;
 
+        // 1. Check Authoritative Firestore Document First
+        const fsBundle = await getLinktreeBundleRecord(linkId);
+        if (fsBundle) {
+          bundle = {
+            title: fsBundle.title || `${linkId} Link Hub`,
+            bio: fsBundle.bio || 'Self-destructing links. Private, zero-log & client-side encrypted.',
+            customName: fsBundle.customName || 'Curated with AuraDrop',
+            avatarIcon: (fsBundle.avatarIcon as any) || 'monogram',
+            themeColor: fsBundle.themeColor || '#6366F1',
+            qrColor: fsBundle.qrColor || '#0F172A',
+            links: fsBundle.links || [],
+          };
+        }
+
         const res = await fetch(`/api/pods/${encodeURIComponent(linkId)}`);
         if (!mounted) return;
 
@@ -131,7 +150,7 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
           if (podObj?.metadata) {
             meta = podObj.metadata;
           }
-          if (podObj?.linkBundle && Array.isArray(podObj.linkBundle.links) && podObj.linkBundle.links.length > 0) {
+          if (!bundle && podObj?.linkBundle && Array.isArray(podObj.linkBundle.links) && podObj.linkBundle.links.length > 0) {
             bundle = podObj.linkBundle;
           }
         }
@@ -355,6 +374,23 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
   const handleUpdateLinkBundle = async (updated: LinkBundleProfile) => {
     setLinkBundle(updated);
     try {
+      // Commit to authoritative Firestore collection
+      await saveLinktreeBundleRecord(
+        linkId,
+        updated.title,
+        updated.links,
+        updated.themeColor || 'indigo',
+        24,
+        'anonymous',
+        {
+          bio: updated.bio,
+          customName: updated.customName,
+          avatarIcon: updated.avatarIcon,
+          themeColor: updated.themeColor,
+          qrColor: updated.qrColor,
+        }
+      ).catch(() => {});
+
       await fetch(`/api/pods/${encodeURIComponent(linkId)}/links`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

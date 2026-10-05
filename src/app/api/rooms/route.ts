@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createChatRoom, ChatRoomTTL } from '@/lib/chatStore';
+import { createChatRoomRecord } from '@/lib/rooms';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,6 +16,7 @@ export async function POST(req: NextRequest) {
       hostPeerId,
       maxMembers = 50,
       burnOnEmpty = false,
+      hostEmail = 'anonymous',
     } = body;
 
     if (!id || !salt || !hostPeerId) {
@@ -25,6 +27,7 @@ export async function POST(req: NextRequest) {
     }
 
     const ttlKey = VALID_TTLS.includes(ttl) ? ttl : '1h';
+    const ttlHours = ttlKey === '24h' ? 24 : ttlKey === '6h' ? 6 : ttlKey === '15m' ? 0.25 : 1;
 
     const metadata = await createChatRoom({
       id: id.trim().toUpperCase(),
@@ -33,6 +36,17 @@ export async function POST(req: NextRequest) {
       hostPeerId,
       maxMembers: Math.min(Number(maxMembers) || 50, 200),
       burnOnEmpty: Boolean(burnOnEmpty),
+    });
+
+    // Authoritative Firestore handshake commit
+    await createChatRoomRecord(
+      id.trim().toUpperCase(),
+      salt,
+      ttlHours,
+      hostEmail,
+      { salt, hostPeerId }
+    ).catch((err) => {
+      console.warn('[API /api/rooms POST] Firestore commit warning:', err);
     });
 
     return NextResponse.json({ success: true, metadata });

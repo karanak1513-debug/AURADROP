@@ -31,6 +31,7 @@ import { generateNATORoomId, generateSecurePassphrase, generateSalt } from '@/li
 import { PodTTL } from '@/types/vault';
 import { sound } from '@/lib/sound';
 import { useAuth } from '@/context/AuthContext';
+import { createChatRoomRecord, saveLinktreeBundleRecord } from '@/lib/rooms';
 
 export function LandingHub() {
   const router = useRouter();
@@ -152,19 +153,33 @@ export function LandingHub() {
       sound.playClick?.();
       setTelemetryStage('Deriving E2EE ratchet salt…');
 
+      const normId = chatId.trim().toUpperCase();
       const salt = generateSalt();
-      await new Promise((r) => setTimeout(r, 80));
+      const hostPeerId = `host-${Date.now().toString(36)}`;
+      const ttlHours = chatTtl === '24h' ? 24 : chatTtl === '6h' ? 6 : chatTtl === '15m' ? 0.25 : 1;
+
+      // 1. Authoritative Firestore Handshake Commit (Pre-allocates room session so recipient never hits 404)
+      await createChatRoomRecord(
+        normId,
+        salt,
+        ttlHours,
+        user?.email || 'anonymous',
+        { salt, hostPeerId }
+      );
+
+      await new Promise((r) => setTimeout(r, 60));
       setTelemetryStage('Opening encrypted ephemeral socket…');
 
       const res = await fetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          id: chatId.trim().toUpperCase(),
+          id: normId,
           salt,
           ttl: chatTtl,
-          hostPeerId: `host-${Date.now().toString(36)}`,
+          hostPeerId,
           burnOnEmpty: true,
+          hostEmail: user?.email || 'anonymous',
         }),
       });
 
@@ -172,8 +187,8 @@ export function LandingHub() {
 
       setTelemetryStage('Connecting to Aura Chat…');
       sound.playSuccess?.();
-      await new Promise((r) => setTimeout(r, 100));
-      router.push(`/chat/${encodeURIComponent(chatId.trim().toUpperCase())}#key=${encodeURIComponent(chatPassphrase.trim())}`);
+      await new Promise((r) => setTimeout(r, 80));
+      router.push(`/chat/${encodeURIComponent(normId)}#key=${encodeURIComponent(chatPassphrase.trim())}`);
     } catch (err) {
       console.error(err);
       setIsDeploying(false);
@@ -192,15 +207,51 @@ export function LandingHub() {
       sound.playClick?.();
       setTelemetryStage('Generating dynamic QR manifest…');
 
-      const salt = generateSalt(linkId.trim().toUpperCase());
-      await new Promise((r) => setTimeout(r, 80));
+      const normId = linkId.trim().toUpperCase();
+      const salt = generateSalt(normId);
+      const ttlHours = linkTtl === 'never' ? 0 : linkTtl === '24h' ? 24 : linkTtl === '6h' ? 6 : linkTtl === '1h' ? 1 : 0.25;
+
+      // 1. Authoritative Firestore Handshake Commit for Linktree
+      await saveLinktreeBundleRecord(
+        normId,
+        `${normId} Link Hub`,
+        [
+          {
+            id: 'link-demo-1',
+            title: 'Project Documentation & Assets',
+            url: 'https://auradrop.io',
+            category: 'website',
+            description: 'Main documentation and project specs.',
+            tag: 'DOCS',
+            clicks: 0,
+            addedBy: user?.displayName || 'Curator',
+            addedAt: Date.now() - 60000,
+          },
+          {
+            id: 'link-demo-2',
+            title: 'GitHub Source Repository',
+            url: 'https://github.com/karanak1513-debug/AURADROP',
+            category: 'github',
+            description: 'Source code commits and issues.',
+            tag: 'CODE',
+            clicks: 0,
+            addedBy: user?.displayName || 'Curator',
+            addedAt: Date.now() - 30000,
+          },
+        ],
+        'indigo',
+        ttlHours,
+        user?.email || 'anonymous'
+      );
+
+      await new Promise((r) => setTimeout(r, 60));
       setTelemetryStage('Configuring Linktree pod…');
 
       const res = await fetch('/api/pods', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          id: linkId.trim().toUpperCase(),
+          id: normId,
           salt,
           ttl: linkTtl,
           burnOnDownload: false,
@@ -212,8 +263,8 @@ export function LandingHub() {
 
       setTelemetryStage('Opening Linktree Studio…');
       sound.playSuccess?.();
-      await new Promise((r) => setTimeout(r, 100));
-      router.push(`/links/${encodeURIComponent(linkId.trim().toUpperCase())}#key=${encodeURIComponent(linkPassphrase.trim())}`);
+      await new Promise((r) => setTimeout(r, 80));
+      router.push(`/links/${encodeURIComponent(normId)}#key=${encodeURIComponent(linkPassphrase.trim())}`);
     } catch (err) {
       console.error(err);
       setIsDeploying(false);

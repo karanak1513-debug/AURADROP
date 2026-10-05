@@ -20,9 +20,12 @@ import { AuthGuard } from '@/components/auth/AuthGuard';
 import { generateNATORoomId, generateSecurePassphrase, generateSalt } from '@/lib/crypto';
 import { PodTTL } from '@/types/vault';
 import { sound } from '@/lib/sound';
+import { createChatRoomRecord } from '@/lib/rooms';
+import { useAuth } from '@/context/AuthContext';
 
 export default function ChatLauncherPage() {
   const router = useRouter();
+  const { user } = useAuth();
 
   const [roomId, setRoomId] = useState<string>(() => generateNATORoomId());
   const [passphrase, setPassphrase] = useState<string>(() => generateSecurePassphrase());
@@ -38,23 +41,38 @@ export default function ChatLauncherPage() {
       setIsDeploying(true);
       sound.playClick?.();
 
+      const normId = roomId.trim().toUpperCase();
       const salt = generateSalt();
+      const hostPeerId = `host-${Date.now().toString(36)}`;
+      const ttlHours = ttl === '24h' ? 24 : ttl === '6h' ? 6 : ttl === '15m' ? 0.25 : 1;
+
+      // 1. Authoritative Firestore Handshake Commit (Prevents receiver 404 race condition)
+      await createChatRoomRecord(
+        normId,
+        salt,
+        ttlHours,
+        user?.email || 'anonymous',
+        { salt, hostPeerId }
+      );
+
+      // 2. Synchronize serverless in-memory room
       const res = await fetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          id: roomId.trim().toUpperCase(),
+          id: normId,
           salt,
           ttl,
-          hostPeerId: `host-${Date.now().toString(36)}`,
+          hostPeerId,
           burnOnEmpty: true,
+          hostEmail: user?.email || 'anonymous',
         }),
       });
 
       if (!res.ok) throw new Error('Failed to create chatroom');
 
       sound.playSuccess?.();
-      router.push(`/chat/${encodeURIComponent(roomId.trim().toUpperCase())}#key=${encodeURIComponent(passphrase.trim())}`);
+      router.push(`/chat/${encodeURIComponent(normId)}#key=${encodeURIComponent(passphrase.trim())}`);
     } catch (err) {
       console.error(err);
       setIsDeploying(false);

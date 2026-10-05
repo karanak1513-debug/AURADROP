@@ -23,10 +23,17 @@ import { DynamicAuraCanvas as AuraCanvas } from '@/components/canvas/DynamicAura
 import { AuraChatRoom, AVATAR_EMOJIS } from '@/components/chat/AuraChatRoom';
 import { AuthGuard } from '@/components/auth/AuthGuard';
 import { SocialShareModal } from '@/components/workspace/SocialShareModal';
-import { generateKeyFromPassphrase } from '@/lib/crypto';
+import { generateKeyFromPassphrase, generateDeterministicSalt, generateSalt } from '@/lib/crypto';
 import { ChatMember, ChatRoomMetadata } from '@/lib/chatStore';
 import { PodMetadata } from '@/types/vault';
 import { sound } from '@/lib/sound';
+import {
+  getChatRoomRecord,
+  createChatRoomRecord,
+  subscribeToChatRoom,
+  purgeChatRoomRecord,
+  FirestoreChatRoom,
+} from '@/lib/rooms';
 
 const PEER_COLORS = [
   '#6366F1', '#06B6D4', '#A855F7', '#10B981',
@@ -50,7 +57,8 @@ export default function RealtimeChatModulePage({ params }: { params: Promise<{ i
   const router = useRouter();
 
   // ── Core State ────────────────────────────────────────────────────────────
-  const [phase, setPhase] = useState<'loading' | 'enter_key' | 'inside' | 'destroyed' | 'not_found'>('loading');
+  const [phase, setPhase] = useState<'loading' | 'retrying' | 'enter_key' | 'inside' | 'destroyed' | 'not_found'>('loading');
+  const [loadingText, setLoadingText] = useState('Decrypting Room Session…');
   const [roomMeta, setRoomMeta] = useState<ChatRoomMetadata | null>(null);
   const [cryptoKey, setCryptoKey] = useState<CryptoKey | null>(null);
   const [passphrase, setPassphrase] = useState('');
@@ -80,27 +88,16 @@ export default function RealtimeChatModulePage({ params }: { params: Promise<{ i
   const [isHost, setIsHost] = useState(false);
   const keyRef = useRef<CryptoKey | null>(null);
 
-  // ── Initialize and extract key from hash ───────────────────────────────────
+  // ── Initialize, Subscribe via Firestore, and extract key from hash ─────────
   useEffect(() => {
     let mounted = true;
+    let unsubFirestore: (() => void) | null = null;
 
     const init = async () => {
       try {
-        const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`);
-        if (!mounted) return;
+        setLoadingText('Decrypting Room Session…');
 
-        if (res.status === 404) {
-          setPhase('not_found');
-          return;
-        }
-        if (!res.ok) throw new Error('Fetch failed');
-
-        const data = await res.json();
-        const meta: ChatRoomMetadata = data.room.metadata;
-        setRoomMeta(meta);
-        setSecondsLeft(Math.max(0, Math.floor((meta.expiresAt - Date.now()) / 1000)));
-        setIsHost(meta.hostPeerId === currentMember.id);
-
+        // Extract key from hash or query parameters (support both #key=PASS and #PASS)
         let extracted = '';
         if (typeof window !== 'undefined') {
           const hash = window.location.hash;
@@ -108,15 +105,146 @@ export default function RealtimeChatModulePage({ params }: { params: Promise<{ i
 
           if (hash.startsWith('#key=')) {
             extracted = decodeURIComponent(hash.replace('#key=', ''));
+          } else if (hash.startsWith('#') && hash.length > 1) {
+            const raw = hash.slice(1);
+            if (!raw.includes('/')) {
+              extracted = decodeURIComponent(raw);
+            }
           } else if (sp.has('key')) {
             extracted = sp.get('key') || '';
-            window.history.replaceState(null, '', `${window.location.pathname}#key=${encodeURIComponent(extracted)}`);
           } else if (sp.has('k')) {
             extracted = sp.get('k') || '';
-            window.history.replaceState(null, '', `${window.location.pathname}#key=${encodeURIComponent(extracted)}`);
+          } else if (sp.has('passphrase')) {
+            extracted = sp.get('passphrase') || '';
+          } else if (sp.has('pass')) {
+            extracted = sp.get('pass') || '';
           }
         }
 
+        // 1. Check Authoritative Firestore Document First
+        let fsData = await getChatRoomRecord(roomId);
+
+        // 2. Race condition protection: If creator just committed, wait 2 seconds before giving up
+        if (!fsData) {
+          setPhase('retrying');
+          setLoadingText('Synchronizing with creator session…');
+          await new Promise((r) => setTimeout(r, 2000));
+          if (!mounted) return;
+          fsData = await getChatRoomRecord(roomId);
+        }
+
+        // 3. Fallback: Check backend /api/rooms/[id]
+        if (!fsData) {
+          try {
+            const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`);
+            if (res.ok) {
+              const bData = await res.json();
+              if (bData.room?.metadata) {
+                const bMeta: ChatRoomMetadata = bData.room.metadata;
+                fsData = {
+                  roomId,
+                  salt: bMeta.salt,
+                  createdAt: bMeta.createdAt,
+                  expiresAt: bMeta.expiresAt,
+                  hostEmail: 'anonymous',
+                  hostPeerId: bMeta.hostPeerId,
+                  status: 'ACTIVE',
+                };
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        // 4. Auto-Provisioning for valid passkey holders: If user has extracted magic key from WhatsApp/QR, NEVER block with 404
+        if (!fsData && extracted) {
+          const autoSalt = generateSalt(roomId);
+          const autoRecord = await createChatRoomRecord(
+            roomId,
+            autoSalt,
+            1,
+            'anonymous',
+            { salt: autoSalt, hostPeerId: currentMember.id }
+          );
+          fsData = {
+            roomId,
+            salt: autoSalt,
+            createdAt: Date.now(),
+            expiresAt: autoRecord.expiresAt,
+            hostEmail: 'anonymous',
+            hostPeerId: currentMember.id,
+            status: 'ACTIVE',
+          };
+        }
+
+        if (!mounted) return;
+
+        // If after retry & fallbacks still not found and no passkey, show not_found
+        if (!fsData) {
+          setPhase('not_found');
+          return;
+        }
+
+        // Expiry & Purge Checks
+        if (fsData.status === 'PURGED') {
+          setDestroyReason('HOST_MANUAL_PURGE');
+          setPhase('destroyed');
+          return;
+        }
+
+        if (fsData.expiresAt > 0 && Date.now() > fsData.expiresAt) {
+          setDestroyReason('LIFECYCLE_TTL_EXPIRED');
+          setPhase('destroyed');
+          return;
+        }
+
+        // Build Active ChatRoomMetadata
+        const meta: ChatRoomMetadata = {
+          id: roomId,
+          salt: fsData.salt || generateDeterministicSalt(roomId),
+          createdAt: fsData.createdAt || Date.now(),
+          expiresAt: fsData.expiresAt || 0,
+          ttlSeconds: fsData.expiresAt > 0 ? Math.max(0, Math.floor((fsData.expiresAt - (fsData.createdAt || Date.now())) / 1000)) : 0,
+          hostPeerId: fsData.hostPeerId || currentMember.id,
+          memberCount: 1,
+          maxMembers: 50,
+          burnOnEmpty: false,
+          isDestroyed: false,
+          messageCount: 0,
+        };
+
+        setRoomMeta(meta);
+        const isNoLimit = meta.expiresAt === 0 || meta.ttlSeconds === 0;
+        setSecondsLeft(isNoLimit ? 0 : Math.max(0, Math.floor((meta.expiresAt - Date.now()) / 1000)));
+        setIsHost(meta.hostPeerId === currentMember.id);
+
+        // Ensure backend serverless container is primed
+        fetch('/api/rooms', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            id: roomId,
+            salt: meta.salt,
+            ttl: '1h',
+            hostPeerId: meta.hostPeerId,
+            burnOnEmpty: false,
+          }),
+        }).catch(() => {});
+
+        // Real-time Firestore session listener (Reacts instantly if room is purged)
+        unsubFirestore = subscribeToChatRoom(roomId, (updated) => {
+          if (!mounted) return;
+          if (!updated || updated.status === 'PURGED') {
+            setDestroyReason('HOST_MANUAL_PURGE');
+            setPhase('destroyed');
+          } else if (updated.expiresAt > 0 && Date.now() > updated.expiresAt) {
+            setDestroyReason('LIFECYCLE_TTL_EXPIRED');
+            setPhase('destroyed');
+          }
+        });
+
+        // 5. Join immediately if magic key present in hash
         if (extracted) {
           await joinWithKey(extracted, meta, mounted);
         } else {
@@ -131,6 +259,7 @@ export default function RealtimeChatModulePage({ params }: { params: Promise<{ i
     init();
     return () => {
       mounted = false;
+      unsubFirestore?.();
     };
   }, [roomId]);
 
@@ -193,6 +322,8 @@ export default function RealtimeChatModulePage({ params }: { params: Promise<{ i
     }
     try {
       sound.playBurn?.();
+      // Purge from both Firestore (instantly vaporizes all clients) and serverless store
+      await purgeChatRoomRecord(roomId, 'EMERGENCY_MANUAL_ZEROIZE');
       await fetch(`/api/rooms/${encodeURIComponent(roomId)}`, { method: 'DELETE' });
     } catch {
       // Ignored
@@ -258,13 +389,19 @@ export default function RealtimeChatModulePage({ params }: { params: Promise<{ i
     );
   }
 
-  // ── Loading Render ────────────────────────────────────────────────────────
-  if (phase === 'loading') {
+  // ── Loading & Synchronizing Render ─────────────────────────────────────────
+  if (phase === 'loading' || phase === 'retrying') {
     return (
-      <div className="min-h-screen min-h-[100dvh] bg-[#07090E] flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <RefreshCw className="w-6 h-6 animate-spin text-indigo-400" />
-          <p className="text-xs font-semibold text-indigo-300">Connecting to encrypted chat…</p>
+      <div className="min-h-screen min-h-[100dvh] bg-[#07090E] flex items-center justify-center p-4 relative overflow-hidden aura-ambient">
+        <AuraCanvas />
+        <div className="relative z-10 flex flex-col items-center gap-3 apple-frosted-glass p-6 sm:p-8 rounded-3xl border border-white/10 shadow-2xl max-w-xs w-full text-center">
+          <div className="w-12 h-12 rounded-2xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+            <RefreshCw className="w-6 h-6 animate-spin text-indigo-400" />
+          </div>
+          <p className="text-xs font-bold text-white tracking-wide">{loadingText}</p>
+          <p className="text-[11px] text-slate-400 font-normal">
+            Verifying end-to-end cryptographic keys & zero-knowledge session…
+          </p>
         </div>
       </div>
     );

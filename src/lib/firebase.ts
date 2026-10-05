@@ -26,5 +26,6 @@ try {
   authInstance = {} as Auth;
 }
 export const auth = authInstance;
+export { db } from './firestore';
 
 export default app;

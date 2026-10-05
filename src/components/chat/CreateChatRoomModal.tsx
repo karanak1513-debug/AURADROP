@@ -24,6 +24,7 @@ import {
 } from '@/lib/crypto';
 import { ChatRoomTTL } from '@/lib/chatStore';
 import { sound } from '@/lib/sound';
+import { createChatRoomRecord } from '@/lib/rooms';
 
 interface CreateChatRoomModalProps {
   isOpen: boolean;
@@ -78,17 +79,28 @@ export function CreateChatRoomModal({ isOpen, onClose }: CreateChatRoomModalProp
       sound.playClick?.();
       setStage('Generating encryption keys…');
 
+      const normId = roomId.trim().toUpperCase();
       const salt = generateSalt();
-      await new Promise(r => setTimeout(r, 150));
-      setStage('Provisioning encrypted room…');
-
       const peerId = `host-${Date.now().toString(36)}`;
+      const ttlHours = ttl === '24h' ? 24 : ttl === '6h' ? 6 : ttl === '15m' ? 0.25 : 1;
+
+      // Authoritative Firestore handshake commit
+      await createChatRoomRecord(
+        normId,
+        salt,
+        ttlHours,
+        'anonymous',
+        { salt, hostPeerId: peerId }
+      );
+
+      await new Promise(r => setTimeout(r, 100));
+      setStage('Provisioning encrypted room…');
 
       const res = await fetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          id: roomId.trim().toUpperCase(),
+          id: normId,
           salt,
           ttl,
           hostPeerId: peerId,
@@ -103,11 +115,11 @@ export function CreateChatRoomModal({ isOpen, onClose }: CreateChatRoomModalProp
 
       setStage('Opening your private chat room…');
       sound.playSuccess?.();
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 200));
 
       // Navigate — passphrase only in hash fragment (never in query params)
       router.push(
-        `/room/${encodeURIComponent(roomId.trim().toUpperCase())}#key=${encodeURIComponent(passphrase.trim())}`
+        `/chat/${encodeURIComponent(normId)}#key=${encodeURIComponent(passphrase.trim())}`
       );
       onClose();
     } catch (err) {
