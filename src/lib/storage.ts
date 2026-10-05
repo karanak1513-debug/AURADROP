@@ -152,9 +152,35 @@ export async function createPod(config: PodConfig): Promise<PodMetadata> {
     auditLog: [initialAudit],
     linkBundle: {
       title: `${config.id} Bundle`,
-      bio: 'Self-destructing links. Private & ephemeral.',
+      bio: 'Self-destructing links. Private, zero-log & client-side encrypted.',
+      customName: `Curated by ${config.creatorPeerId || 'Curator'}`,
+      avatarIcon: 'monogram',
       themeColor: '#6366F1',
-      links: [],
+      qrColor: '#0F172A',
+      links: [
+        {
+          id: `link-demo-1`,
+          title: 'Project Documentation & Assets',
+          url: 'https://auradrop.io',
+          category: 'website',
+          description: 'Main documentation and project specs.',
+          tag: 'DOCS',
+          clicks: 0,
+          addedBy: config.creatorPeerId || 'Curator',
+          addedAt: now - 60000,
+        },
+        {
+          id: `link-demo-2`,
+          title: 'GitHub Source Repository',
+          url: 'https://github.com/karanak1513-debug/AURADROP',
+          category: 'github',
+          description: 'Source code commits and issues.',
+          tag: 'CODE',
+          clicks: 0,
+          addedBy: config.creatorPeerId || 'Curator',
+          addedAt: now - 30000,
+        },
+      ],
     },
   };
 

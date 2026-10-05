@@ -16,6 +16,7 @@ import {
   Zap,
   Clock,
   Sparkles,
+  X,
 } from 'lucide-react';
 import { Navbar } from '@/components/layout/Navbar';
 import { DynamicAuraCanvas as AuraCanvas } from '@/components/canvas/DynamicAuraCanvas';
@@ -32,6 +33,50 @@ function formatCountdown(s: number): string {
   const sec = s % 60;
   return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
 }
+
+const STARTER_LINKS_BUNDLE: LinkBundleProfile = {
+  title: 'Link Hub',
+  bio: 'Self-destructing links. Private, zero-log & client-side encrypted.',
+  customName: 'Curated by AuraDrop',
+  avatarIcon: 'monogram',
+  themeColor: '#6366F1',
+  qrColor: '#0F172A',
+  links: [
+    {
+      id: 'link-starter-1',
+      title: 'Project Documentation & Assets',
+      url: 'https://auradrop.io',
+      category: 'website',
+      description: 'Main documentation and project specs.',
+      tag: 'DOCS',
+      clicks: 12,
+      addedBy: 'AuraDrop',
+      addedAt: Date.now() - 60000,
+    },
+    {
+      id: 'link-starter-2',
+      title: 'GitHub Source Repository',
+      url: 'https://github.com/karanak1513-debug/AURADROP',
+      category: 'github',
+      description: 'Source code commits and issues.',
+      tag: 'CODE',
+      clicks: 8,
+      addedBy: 'AuraDrop',
+      addedAt: Date.now() - 30000,
+    },
+    {
+      id: 'link-starter-3',
+      title: 'Ephemeral Secret Drop Portal',
+      url: 'https://auradrop-platform.netlify.app',
+      category: 'website',
+      description: 'Zero-knowledge encrypted drop rooms and file transfers.',
+      tag: 'PORTAL',
+      clicks: 5,
+      addedBy: 'AuraDrop',
+      addedAt: Date.now() - 15000,
+    },
+  ],
+};
 
 export default function SmartLinktreeModulePage({ params }: { params: Promise<{ id: string }> }) {
   const resolvedParams = use(params);
@@ -52,6 +97,7 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
 
   const [linkBundle, setLinkBundle] = useState<LinkBundleProfile | undefined>(undefined);
   const [showShareModal, setShowShareModal] = useState(false);
+  const [showUnlockModal, setShowUnlockModal] = useState(false);
 
   const [currentPeer] = useState<Peer>(() => {
     const hex = Math.random().toString(16).substring(2, 6).toUpperCase();
@@ -73,16 +119,48 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
 
     const init = async () => {
       try {
+        let meta: PodMetadata | null = null;
+        let bundle: LinkBundleProfile | undefined = undefined;
+
         const res = await fetch(`/api/pods/${encodeURIComponent(linkId)}`);
         if (!mounted) return;
 
-        if (res.status === 404) {
-          // Check if room exists
+        if (res.ok) {
+          const data = await res.json();
+          const podObj = data.pod || data.state;
+          if (podObj?.metadata) {
+            meta = podObj.metadata;
+          }
+          if (podObj?.linkBundle && Array.isArray(podObj.linkBundle.links) && podObj.linkBundle.links.length > 0) {
+            bundle = podObj.linkBundle;
+          }
+        }
+
+        // Secondary check: query /api/pods/[id]/links if bundle empty
+        if (!bundle) {
+          try {
+            const linksRes = await fetch(`/api/pods/${encodeURIComponent(linkId)}/links`);
+            if (linksRes.ok) {
+              const lData = await linksRes.json();
+              if (lData?.linkBundle && Array.isArray(lData.linkBundle.links) && lData.linkBundle.links.length > 0) {
+                bundle = lData.linkBundle;
+              }
+              if (!meta && lData?.metadata) {
+                meta = lData.metadata;
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        // Check if room exists as fallback
+        if (!meta) {
           const roomRes = await fetch(`/api/rooms/${encodeURIComponent(linkId)}`);
           if (roomRes.ok) {
             const rData = await roomRes.json();
             const rMeta: ChatRoomMetadata = rData.room.metadata;
-            const mockMeta: PodMetadata = {
+            meta = {
               id: linkId,
               salt: rMeta.salt,
               createdAt: rMeta.createdAt,
@@ -94,15 +172,13 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
               creatorPeerId: rMeta.hostPeerId,
               isZeroized: false,
             };
-            setPodMeta(mockMeta);
-            setSecondsLeft(Math.max(0, Math.floor((mockMeta.expiresAt - Date.now()) / 1000)));
-            checkUrlKey(mockMeta, mounted);
-            return;
           }
+        }
 
-          // Resilient Auto-Provisioning: QR code scans or mobile links should NEVER show "Link Hub Not Found"
+        // Resilient Fallback Auto-Provisioning: QR scans or shared links NEVER show 404
+        if (!meta) {
           const fallbackSalt = generateDeterministicSalt(linkId);
-          const autoMeta: PodMetadata = {
+          meta = {
             id: linkId,
             salt: fallbackSalt,
             createdAt: Date.now(),
@@ -114,10 +190,6 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
             creatorPeerId: 'OPERATOR',
             isZeroized: false,
           };
-          setPodMeta(autoMeta);
-          setSecondsLeft(0);
-
-          // Synchronize in background
           fetch('/api/pods', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -129,30 +201,24 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
               burnOnEmpty: false,
             }),
           }).catch(() => null);
-
-          checkUrlKey(autoMeta, mounted);
-          return;
         }
 
-        if (!res.ok) throw new Error('Fetch failed');
-
-        const data = await res.json();
-        const podObj = data.pod || data.state;
-        if (!podObj || !podObj.metadata) {
-          throw new Error('Pod metadata missing from response');
+        // Starter links guarantee: links are always populated and visible
+        if (!bundle || !Array.isArray(bundle.links) || bundle.links.length === 0) {
+          bundle = {
+            ...STARTER_LINKS_BUNDLE,
+            title: `${linkId} Link Hub`,
+          };
         }
-        const meta: PodMetadata = podObj.metadata;
+
         setPodMeta(meta);
-        if (podObj.linkBundle) {
-          setLinkBundle(podObj.linkBundle);
-        }
+        setLinkBundle(bundle);
         const isNoLimit = meta.expiresAt === 0 || meta.ttlSeconds === 0;
         setSecondsLeft(isNoLimit ? 0 : Math.max(0, Math.floor((meta.expiresAt - Date.now()) / 1000)));
 
         checkUrlKey(meta, mounted);
       } catch (err) {
         console.error('[SmartLinktree] Init error:', err);
-        // On network error or cold-start timeout, provide fallback instead of dead-end 404 screen
         const fallbackSalt = generateDeterministicSalt(linkId);
         const autoMeta: PodMetadata = {
           id: linkId,
@@ -166,7 +232,12 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
           creatorPeerId: 'OPERATOR',
           isZeroized: false,
         };
+        const starter = {
+          ...STARTER_LINKS_BUNDLE,
+          title: `${linkId} Link Hub`,
+        };
         setPodMeta(autoMeta);
+        setLinkBundle(starter);
         setSecondsLeft(0);
         checkUrlKey(autoMeta, mounted);
       }
@@ -198,7 +269,10 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
       if (extracted) {
         await joinWithKey(extracted, meta, isMounted);
       } else {
-        setPhase('enter_key');
+        // Public visitor mode: Show all links immediately upon QR scan!
+        if (isMounted) {
+          setPhase('inside');
+        }
       }
     };
 
@@ -220,6 +294,7 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
       keyRef.current = key;
       setCryptoKey(key);
       setPassphrase(pass);
+      setShowUnlockModal(false);
 
       if (typeof window !== 'undefined' && !window.location.hash.startsWith('#key=')) {
         window.history.replaceState(null, '', `${window.location.pathname}#key=${encodeURIComponent(pass)}`);
@@ -231,7 +306,6 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
       console.error('[SmartLinktree] Key derivation failed:', err);
       if (isMounted) {
         setKeyError('Could not unlock with this password. Please verify.');
-        setPhase('enter_key');
       }
     } finally {
       if (isMounted) setIsJoining(false);
@@ -484,6 +558,14 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
                   </>
                 )}
               </button>
+
+              <button
+                type="button"
+                onClick={() => setPhase('inside')}
+                className="w-full mt-2 py-2 text-xs font-semibold text-indigo-400 hover:text-indigo-300 transition-colors flex items-center justify-center gap-1 cursor-pointer"
+              >
+                View Public Hub as Guest →
+              </button>
             </form>
           </div>
 
@@ -499,8 +581,8 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
     );
   }
 
-  // ── Inside Dedicated Smart Linktree Module ─────────────────────────────────
-  if (phase === 'inside' && cryptoKey && podMeta) {
+  // ── Inside Dedicated Smart Linktree Module (Public Hub & Creator Studio) ───
+  if (phase === 'inside' && podMeta) {
     return (
       <div className="min-h-screen min-h-[100dvh] bg-[#07090E] text-slate-100 flex flex-col aura-ambient relative overflow-x-hidden">
         {/* 3D WebGL Canvas */}
@@ -511,11 +593,11 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
           podId={linkId}
           passphrase={passphrase}
           isZeroized={false}
-          onPurge={handlePanic}
+          onPurge={cryptoKey ? handlePanic : undefined}
           onOpenShare={() => setShowShareModal(true)}
         />
 
-        {/* Main Content Wrapped in Mandatory Google AuthGuard */}
+        {/* Main Content */}
         <main className="flex-1 max-w-6xl w-full mx-auto px-3 sm:px-6 lg:px-8 py-3 sm:py-5 relative z-10 flex flex-col">
           {/* Header Sub-bar (100% Mobile Responsive) */}
           <div className="flex flex-wrap items-center justify-between gap-2 mb-4 px-1">
@@ -524,9 +606,16 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
                 <QrCode className="w-3 h-3 text-purple-400 shrink-0" />
                 <span>Smart Linktree & Dynamic QR</span>
               </span>
-              <span className="text-[10px] px-2 py-1 rounded-full font-bold bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
-                Google Sync
-              </span>
+              {!cryptoKey ? (
+                <span className="text-[10px] px-2 py-1 rounded-full font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  Live Public Hub
+                </span>
+              ) : (
+                <span className="text-[10px] px-2 py-1 rounded-full font-bold bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+                  Creator Mode
+                </span>
+              )}
             </div>
 
             <div className="flex items-center gap-2 ml-auto">
@@ -545,7 +634,8 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
               passphrase={passphrase}
               initialBundle={linkBundle}
               currentPeer={currentPeer}
-              isReadOnly={false}
+              isReadOnly={!cryptoKey}
+              onPromptUnlock={() => setShowUnlockModal(true)}
               onUpdateBundle={handleUpdateLinkBundle}
               onLinkClick={handleLinkClick}
               secondsRemaining={isNoTimeLimit ? 0 : secondsLeft}
@@ -563,6 +653,89 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
             passphrase={passphrase}
             secondsRemaining={isNoTimeLimit ? 0 : secondsLeft}
           />
+        )}
+
+        {/* Creator Studio Unlock Modal */}
+        {showUnlockModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
+            <div className="relative w-full max-w-sm apple-frosted-glass rounded-3xl p-6 border border-white/10 shadow-2xl">
+              <button
+                type="button"
+                onClick={() => setShowUnlockModal(false)}
+                className="absolute top-4 right-4 text-slate-400 hover:text-white p-1 rounded-xl hover:bg-white/5 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-10 h-10 rounded-2xl bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center">
+                  <Lock className="w-5 h-5 text-indigo-400" />
+                </div>
+                <div>
+                  <h3 className="font-heading font-bold text-sm text-white">Unlock Creator Studio</h3>
+                  <p className="text-[11px] text-slate-400">Enter password to edit or customize links</p>
+                </div>
+              </div>
+
+              <form onSubmit={handleKeySubmit} className="space-y-3 mt-4">
+                <div className="relative">
+                  <input
+                    type={showPassphrase ? 'text' : 'password'}
+                    value={passphraseInput}
+                    onChange={(e) => {
+                      setPassphraseInput(e.target.value);
+                      setKeyError('');
+                    }}
+                    placeholder="Enter hub password…"
+                    autoFocus
+                    required
+                    className="w-full apple-frosted-input rounded-2xl px-4 py-2.5 text-xs text-white outline-none pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassphrase(!showPassphrase)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white cursor-pointer"
+                  >
+                    {showPassphrase ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+
+                {keyError && (
+                  <p className="text-[11px] text-rose-400 font-medium flex items-center gap-1.5">
+                    <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                    {keyError}
+                  </p>
+                )}
+
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowUnlockModal(false)}
+                    className="flex-1 py-2.5 rounded-2xl bg-white/5 hover:bg-white/10 text-slate-300 font-semibold text-xs transition-colors cursor-pointer"
+                  >
+                    Keep Viewing
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={isJoining || !passphraseInput.trim()}
+                    className="flex-1 py-2.5 rounded-2xl bg-gradient-to-r from-indigo-600 to-cyan-500 hover:from-indigo-500 hover:to-cyan-400 text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-lg shadow-indigo-500/30 disabled:opacity-50 transition-all cursor-pointer tactile-btn"
+                  >
+                    {isJoining ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Checking…</span>
+                      </>
+                    ) : (
+                      <>
+                        <Key className="w-3.5 h-3.5" />
+                        <span>Unlock Studio</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
         )}
       </div>
     );

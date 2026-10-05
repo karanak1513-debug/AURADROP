@@ -31,10 +31,40 @@ export async function GET(
           creatorPeerId: room.metadata.hostPeerId,
           isZeroized: false,
         };
+        const defaultStarterBundle = {
+          title: `${podId} Link Hub`,
+          bio: 'Self-destructing links. Private, zero-log & client-side encrypted.',
+          themeColor: '#6366F1',
+          qrColor: '#0F172A',
+          links: [
+            {
+              id: 'link-demo-1',
+              title: 'Project Documentation & Assets',
+              url: 'https://auradrop.io',
+              category: 'website' as const,
+              description: 'Main documentation and project specs.',
+              tag: 'DOCS',
+              clicks: 0,
+              addedBy: room.metadata.hostPeerId || 'Host',
+              addedAt: Date.now() - 60000,
+            },
+            {
+              id: 'link-demo-2',
+              title: 'GitHub Source Repository',
+              url: 'https://github.com/karanak1513-debug/AURADROP',
+              category: 'github' as const,
+              description: 'Source code commits and issues.',
+              tag: 'CODE',
+              clicks: 0,
+              addedBy: room.metadata.hostPeerId || 'Host',
+              addedAt: Date.now() - 30000,
+            },
+          ],
+        };
         return NextResponse.json({
           success: true,
-          pod: { metadata: mockMeta, linkBundle: { title: `${podId} Hub`, links: [] } },
-          state: { metadata: mockMeta, linkBundle: { title: `${podId} Hub`, links: [] } },
+          pod: { metadata: mockMeta, linkBundle: defaultStarterBundle },
+          state: { metadata: mockMeta, linkBundle: defaultStarterBundle },
         });
       }
 
@@ -58,6 +88,41 @@ export async function GET(
         { error: 'POD_NOT_FOUND_OR_EXPIRED', message: 'This ephemeral pod does not exist or has expired.' },
         { status: 404 }
       );
+    }
+
+    if (!state.linkBundle || !state.linkBundle.links || state.linkBundle.links.length === 0) {
+      state.linkBundle = {
+        title: state.linkBundle?.title || `${podId} Link Hub`,
+        bio: state.linkBundle?.bio || 'Self-destructing links. Private, zero-log & client-side encrypted.',
+        customName: state.linkBundle?.customName || 'Curated by AuraDrop',
+        avatarIcon: state.linkBundle?.avatarIcon || 'monogram',
+        themeColor: state.linkBundle?.themeColor || '#6366F1',
+        qrColor: state.linkBundle?.qrColor || '#0F172A',
+        links: [
+          {
+            id: 'link-demo-1',
+            title: 'Project Documentation & Assets',
+            url: 'https://auradrop.io',
+            category: 'website',
+            description: 'Main documentation and project specs.',
+            tag: 'DOCS',
+            clicks: 0,
+            addedBy: 'AuraDrop',
+            addedAt: Date.now() - 60000,
+          },
+          {
+            id: 'link-demo-2',
+            title: 'GitHub Source Repository',
+            url: 'https://github.com/karanak1513-debug/AURADROP',
+            category: 'github',
+            description: 'Source code commits and issues.',
+            tag: 'CODE',
+            clicks: 0,
+            addedBy: 'AuraDrop',
+            addedAt: Date.now() - 30000,
+          },
+        ],
+      };
     }
 
     return NextResponse.json({
