@@ -5,6 +5,8 @@
  * All content vaporizes on room expiry or panic wipe
  */
 
+import { getStore } from '@netlify/blobs';
+
 export type ChatRoomTTL = '15m' | '1h' | '6h' | '24h';
 
 export interface ChatMember {
@@ -110,6 +112,15 @@ const chatMedia = globalThis.__auraChatMedia ?? (globalThis.__auraChatMedia = ne
 const chatSubscribers = globalThis.__auraChatSubscribers ?? (globalThis.__auraChatSubscribers = new Map());
 const chatBurnTimers = globalThis.__auraChatBurnTimers ?? (globalThis.__auraChatBurnTimers = new Map());
 
+// Netlify Blobs store for chat rooms (strong consistency across lambdas)
+function getBlobsChatStore() {
+  try {
+    return getStore({ name: 'auradrop-chat-rooms', consistency: 'strong' });
+  } catch {
+    return null;
+  }
+}
+
 // ── TTL Janitor ─────────────────────────────────────────────────────────────
 
 if (!globalThis.__auraChatJanitorStarted) {
@@ -177,12 +188,39 @@ export async function createChatRoom(config: CreateRoomConfig): Promise<ChatRoom
   };
 
   chatRooms.set(config.id, fullState);
+
+  // Sync to Netlify Blobs for cross-lambda persistence
+  const blobStore = getBlobsChatStore();
+  if (blobStore) {
+    try {
+      await blobStore.setJSON(config.id, fullState);
+    } catch (err) {
+      console.warn('[AURA CHAT] Blobs error on createChatRoom:', err);
+    }
+  }
+
   console.log(`[AURA CHAT] Room [${config.id}] created. TTL: ${config.ttl}`);
   return metadata;
 }
 
 export async function getChatRoom(roomId: string): Promise<ChatRoomFullState | null> {
-  const room = chatRooms.get(roomId) || null;
+  let room = chatRooms.get(roomId) || null;
+
+  // If not in local memory, check Netlify Blobs
+  if (!room) {
+    const blobStore = getBlobsChatStore();
+    if (blobStore) {
+      try {
+        const data = await blobStore.get(roomId, { type: 'json' });
+        if (data && typeof data === 'object') {
+          room = data as ChatRoomFullState;
+          chatRooms.set(roomId, room);
+        }
+      } catch (err) {
+        console.warn('[AURA CHAT] Blobs error on getChatRoom:', err);
+      }
+    }
+  }
 
   if (!room) return null;
 
@@ -218,6 +256,16 @@ export async function destroyRoom(roomId: string, reason: string): Promise<boole
     }
   }
 
+  // Delete from Netlify Blobs
+  const blobStore = getBlobsChatStore();
+  if (blobStore) {
+    try {
+      await blobStore.delete(roomId);
+    } catch (err) {
+      console.warn('[AURA CHAT] Blobs error on destroyRoom:', err);
+    }
+  }
+
   // Broadcast destroy to all SSE subscribers
   broadcastChat(roomId, { type: 'room_destroyed', payload: { reason, timestamp: Date.now() } });
 
@@ -227,6 +275,7 @@ export async function destroyRoom(roomId: string, reason: string): Promise<boole
   console.log(`[AURA CHAT] Room [${roomId}] DESTROYED. Reason: ${reason}.`);
   return true;
 }
+
 
 // ── Member Management ────────────────────────────────────────────────────────
 
@@ -258,6 +307,11 @@ export async function joinRoom(
   // Prune stale members (no ping > 60s)
   room.members = room.members.filter((m: ChatMember) => Date.now() - m.lastPing < 60_000);
   chatRooms.set(roomId, room);
+
+  const blobStore = getBlobsChatStore();
+  if (blobStore) {
+    blobStore.setJSON(roomId, room).catch((e) => console.warn('[AURA CHAT] Blobs joinRoom sync error:', e));
+  }
 
   return room;
 }
@@ -315,6 +369,10 @@ export async function leaveRoom(roomId: string, memberId: string): Promise<void>
   }
 
   chatRooms.set(roomId, room);
+  const blobStore = getBlobsChatStore();
+  if (blobStore) {
+    blobStore.setJSON(roomId, room).catch((e) => console.warn('[AURA CHAT] Blobs leaveRoom sync error:', e));
+  }
 }
 
 // ── Message Relay ────────────────────────────────────────────────────────────
@@ -347,6 +405,10 @@ export async function relayMessage(
   }
 
   chatRooms.set(roomId, room);
+  const blobStore = getBlobsChatStore();
+  if (blobStore) {
+    blobStore.setJSON(roomId, room).catch((e) => console.warn('[AURA CHAT] Blobs relayMessage sync error:', e));
+  }
 
   // Broadcast to all SSE subscribers
   broadcastChat(roomId, { type: 'new_message', payload: message });

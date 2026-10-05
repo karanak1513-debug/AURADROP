@@ -1,5 +1,6 @@
 import { initializeApp, getApps, getApp, type FirebaseApp } from "firebase/app";
 import { getAuth, GoogleAuthProvider, type Auth } from "firebase/auth";
+import { getFirestore, initializeFirestore, type Firestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBlZHdX_h3rO0M7lKq6qX1ctZhcA-qFnIw",
@@ -26,6 +27,19 @@ try {
   authInstance = {} as Auth;
 }
 export const auth = authInstance;
-export { db } from './firestore';
+
+let firestoreInstance: Firestore;
+try {
+  firestoreInstance = getFirestore(app);
+} catch {
+  try {
+    firestoreInstance = initializeFirestore(app, {});
+  } catch (e) {
+    console.warn('[Firebase] Firestore init warning:', e);
+    firestoreInstance = {} as Firestore;
+  }
+}
+export const db: Firestore = firestoreInstance;
 
 export default app;
+
