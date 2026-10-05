@@ -49,8 +49,27 @@ export function generateSecurePassphrase(): string {
 /**
  * Generate a fresh cryptographically random salt (base64)
  */
-export function generateSalt(): string {
+export function generateSalt(seed?: string): string {
+  if (seed) {
+    return generateDeterministicSalt(seed);
+  }
   const salt = crypto.getRandomValues(new Uint8Array(SALT_LENGTH));
+  return uint8ArrayToBase64(salt);
+}
+
+/**
+ * Generate a deterministic Base64 salt derived from a podId / roomId.
+ * Guarantees that if serverless storage cold-starts, any peer or container
+ * can reconstruct the exact same PBKDF2 salt for key derivation.
+ */
+export function generateDeterministicSalt(seed: string): string {
+  const enc = new TextEncoder();
+  const input = `AURADROP-SALT-V1:${seed.trim().toUpperCase()}`;
+  const inputBytes = enc.encode(input);
+  const salt = new Uint8Array(SALT_LENGTH);
+  for (let i = 0; i < SALT_LENGTH; i++) {
+    salt[i] = inputBytes[i % inputBytes.length] ^ ((i * 37 + 13) & 0xff);
+  }
   return uint8ArrayToBase64(salt);
 }
 

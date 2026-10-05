@@ -224,13 +224,16 @@ export function SmartLinktreeVault({
     setShowSavedList(false);
   };
 
-  // Sync with initialBundle updates from remote peers
+  // Sync with initialBundle updates from remote peers or publish starter bundle
   useEffect(() => {
-    if (initialBundle) {
+    if (initialBundle && initialBundle.links && initialBundle.links.length > 0) {
       setBundle(initialBundle);
       if (initialBundle.qrColor) {
         setQrColor(initialBundle.qrColor);
       }
+    } else if (!isReadOnly && bundle && bundle.links && bundle.links.length > 0) {
+      // Ensure initial demo/starter bundle is persisted in Netlify Blobs so QR scans immediately see links
+      onUpdateBundle(bundle);
     }
   }, [initialBundle]);
 

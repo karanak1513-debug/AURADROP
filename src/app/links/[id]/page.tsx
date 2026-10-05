@@ -21,7 +21,7 @@ import { Navbar } from '@/components/layout/Navbar';
 import { DynamicAuraCanvas as AuraCanvas } from '@/components/canvas/DynamicAuraCanvas';
 import { SmartLinktreeVault } from '@/components/workspace/SmartLinktreeVault';
 import { SocialShareModal } from '@/components/workspace/SocialShareModal';
-import { generateKeyFromPassphrase } from '@/lib/crypto';
+import { generateKeyFromPassphrase, generateDeterministicSalt } from '@/lib/crypto';
 import { ChatRoomMetadata } from '@/lib/chatStore';
 import { LinkBundleProfile, Peer, PodMetadata } from '@/types/vault';
 import { sound } from '@/lib/sound';
@@ -100,7 +100,37 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
             return;
           }
 
-          setPhase('not_found');
+          // Resilient Auto-Provisioning: QR code scans or mobile links should NEVER show "Link Hub Not Found"
+          const fallbackSalt = generateDeterministicSalt(linkId);
+          const autoMeta: PodMetadata = {
+            id: linkId,
+            salt: fallbackSalt,
+            createdAt: Date.now(),
+            expiresAt: 0,
+            ttlSeconds: 0,
+            burnOnDownload: false,
+            burnOnEmpty: false,
+            readOnlyGuests: false,
+            creatorPeerId: 'OPERATOR',
+            isZeroized: false,
+          };
+          setPodMeta(autoMeta);
+          setSecondsLeft(0);
+
+          // Synchronize in background
+          fetch('/api/pods', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              id: linkId,
+              salt: fallbackSalt,
+              ttl: 'never',
+              burnOnDownload: false,
+              burnOnEmpty: false,
+            }),
+          }).catch(() => null);
+
+          checkUrlKey(autoMeta, mounted);
           return;
         }
 
@@ -122,7 +152,23 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
         checkUrlKey(meta, mounted);
       } catch (err) {
         console.error('[SmartLinktree] Init error:', err);
-        if (mounted) setPhase('not_found');
+        // On network error or cold-start timeout, provide fallback instead of dead-end 404 screen
+        const fallbackSalt = generateDeterministicSalt(linkId);
+        const autoMeta: PodMetadata = {
+          id: linkId,
+          salt: fallbackSalt,
+          createdAt: Date.now(),
+          expiresAt: 0,
+          ttlSeconds: 0,
+          burnOnDownload: false,
+          burnOnEmpty: false,
+          readOnlyGuests: false,
+          creatorPeerId: 'OPERATOR',
+          isZeroized: false,
+        };
+        setPodMeta(autoMeta);
+        setSecondsLeft(0);
+        checkUrlKey(autoMeta, mounted);
       }
     };
 
@@ -139,6 +185,12 @@ export default function SmartLinktreeModulePage({ params }: { params: Promise<{ 
           window.history.replaceState(null, '', `${window.location.pathname}#key=${encodeURIComponent(extracted)}`);
         } else if (sp.has('k')) {
           extracted = sp.get('k') || '';
+          window.history.replaceState(null, '', `${window.location.pathname}#key=${encodeURIComponent(extracted)}`);
+        } else if (sp.has('passphrase')) {
+          extracted = sp.get('passphrase') || '';
+          window.history.replaceState(null, '', `${window.location.pathname}#key=${encodeURIComponent(extracted)}`);
+        } else if (sp.has('pass')) {
+          extracted = sp.get('pass') || '';
           window.history.replaceState(null, '', `${window.location.pathname}#key=${encodeURIComponent(extracted)}`);
         }
       }

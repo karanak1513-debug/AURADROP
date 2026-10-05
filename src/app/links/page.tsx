@@ -38,7 +38,7 @@ export default function LinksLauncherPage() {
       setIsDeploying(true);
       sound.playClick?.();
 
-      const salt = generateSalt();
+      const salt = generateSalt(linkId.trim().toUpperCase());
       const res = await fetch('/api/pods', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

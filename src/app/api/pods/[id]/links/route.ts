@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getPodState, updateLinkBundle, recordLinkClick } from '@/lib/storage';
+import { getPodState, updateLinkBundle, recordLinkClick, createPod } from '@/lib/storage';
+import { generateDeterministicSalt } from '@/lib/crypto';
 import { LinkBundleProfile } from '@/types/vault';
 
 export const dynamic = 'force-dynamic';
@@ -11,7 +12,22 @@ export async function GET(
   try {
     const { id } = await context.params;
     const podId = id.toUpperCase();
-    const state = await getPodState(podId);
+    let state = await getPodState(podId);
+
+    if (!state) {
+      const defaultSalt = generateDeterministicSalt(podId);
+      await createPod({
+        id: podId,
+        salt: defaultSalt,
+        ttl: 'never',
+        ttlSeconds: 0,
+        burnOnDownload: false,
+        burnOnEmpty: false,
+        readOnlyGuests: false,
+        creatorPeerId: 'OPERATOR',
+      });
+      state = await getPodState(podId);
+    }
 
     if (!state) {
       return NextResponse.json(
@@ -26,9 +42,10 @@ export async function GET(
       linkBundle: state.linkBundle || null,
       metadata: state.metadata,
     });
-  } catch (err) {
+  } catch (err: unknown) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
     console.error('[API /api/pods/[id]/links GET] Error:', err);
-    return NextResponse.json({ error: 'Failed to fetch link bundle' }, { status: 500 });
+    return NextResponse.json({ error: 'Failed to fetch link bundle', details: errorMsg }, { status: 500 });
   }
 }
 
@@ -48,9 +65,19 @@ export async function POST(
       return NextResponse.json({ error: 'Invalid link bundle payload' }, { status: 400 });
     }
 
-    const success = await updateLinkBundle(podId, bundle, peerCodename);
+    let success = await updateLinkBundle(podId, bundle, peerCodename);
     if (!success) {
-      return NextResponse.json({ error: 'Pod not found or zeroized' }, { status: 404 });
+      await createPod({
+        id: podId,
+        salt: generateDeterministicSalt(podId),
+        ttl: 'never',
+        ttlSeconds: 0,
+        burnOnDownload: false,
+        burnOnEmpty: false,
+        readOnlyGuests: false,
+        creatorPeerId: peerCodename,
+      });
+      success = await updateLinkBundle(podId, bundle, peerCodename);
     }
 
     return NextResponse.json({

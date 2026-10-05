@@ -192,7 +192,7 @@ export function LandingHub() {
       sound.playClick?.();
       setTelemetryStage('Generating dynamic QR manifest…');
 
-      const salt = generateSalt();
+      const salt = generateSalt(linkId.trim().toUpperCase());
       await new Promise((r) => setTimeout(r, 80));
       setTelemetryStage('Configuring Linktree pod…');
 

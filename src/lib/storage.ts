@@ -175,7 +175,11 @@ export async function createPod(config: PodConfig): Promise<PodMetadata> {
   if (redisClient) {
     try {
       const redisKey = `pod:${config.id}`;
-      await redisClient.set(redisKey, JSON.stringify(fullState), { ex: config.ttlSeconds });
+      if (config.ttlSeconds > 0) {
+        await redisClient.set(redisKey, JSON.stringify(fullState), { ex: config.ttlSeconds });
+      } else {
+        await redisClient.set(redisKey, JSON.stringify(fullState));
+      }
     } catch (err) {
       console.error('[VAULT-ZERO] Redis error on createPod:', err);
     }
@@ -251,8 +255,12 @@ export async function updateScratchpad(
 
   if (redisClient) {
     try {
-      const ttl = Math.max(1, Math.floor((state.metadata.expiresAt - Date.now()) / 1000));
-      await redisClient.set(`pod:${podId}`, JSON.stringify(state), { ex: ttl });
+      if (state.metadata.expiresAt === 0) {
+        await redisClient.set(`pod:${podId}`, JSON.stringify(state));
+      } else {
+        const ttl = Math.max(1, Math.floor((state.metadata.expiresAt - Date.now()) / 1000));
+        await redisClient.set(`pod:${podId}`, JSON.stringify(state), { ex: ttl });
+      }
     } catch (err) {
       console.error('[VAULT-ZERO] Redis error on updateScratchpad:', err);
     }
@@ -271,8 +279,23 @@ export async function updateLinkBundle(
   bundle: LinkBundleProfile,
   peerCodename: string = 'User'
 ): Promise<boolean> {
-  const state = await getPodState(podId);
-  if (!state || state.metadata.isZeroized) return false;
+  let state = await getPodState(podId);
+  if (!state || state.metadata.isZeroized) {
+    if (!state) {
+      await createPod({
+        id: podId,
+        salt: '00000000000000000000000000000000',
+        ttl: 'never',
+        ttlSeconds: 0,
+        burnOnDownload: false,
+        burnOnEmpty: false,
+        readOnlyGuests: false,
+        creatorPeerId: peerCodename,
+      });
+      state = await getPodState(podId);
+    }
+    if (!state || state.metadata.isZeroized) return false;
+  }
 
   state.linkBundle = bundle;
 
@@ -299,8 +322,12 @@ export async function updateLinkBundle(
 
   if (redisClient) {
     try {
-      const ttl = Math.max(1, Math.floor((state.metadata.expiresAt - Date.now()) / 1000));
-      await redisClient.set(`pod:${podId}`, JSON.stringify(state), { ex: ttl });
+      if (state.metadata.expiresAt === 0) {
+        await redisClient.set(`pod:${podId}`, JSON.stringify(state));
+      } else {
+        const ttl = Math.max(1, Math.floor((state.metadata.expiresAt - Date.now()) / 1000));
+        await redisClient.set(`pod:${podId}`, JSON.stringify(state), { ex: ttl });
+      }
     } catch (err) {
       console.error('[AURA] Redis error on updateLinkBundle:', err);
     }
@@ -412,8 +439,12 @@ export async function addFile(
 
   if (redisClient) {
     try {
-      const ttl = Math.max(1, Math.floor((state.metadata.expiresAt - Date.now()) / 1000));
-      await redisClient.set(`pod:${podId}`, JSON.stringify(state), { ex: ttl });
+      if (state.metadata.expiresAt === 0) {
+        await redisClient.set(`pod:${podId}`, JSON.stringify(state));
+      } else {
+        const ttl = Math.max(1, Math.floor((state.metadata.expiresAt - Date.now()) / 1000));
+        await redisClient.set(`pod:${podId}`, JSON.stringify(state), { ex: ttl });
+      }
     } catch (err) {
       console.error('[VAULT-ZERO] Redis error on addFile:', err);
     }
